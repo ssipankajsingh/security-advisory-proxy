@@ -399,7 +399,23 @@ function startSchedule(cronExpr, config){
   }
 }
 
-// ─── ROUTES ──────────────────────────────────────────────────────────────────
+// ─── ACCESS CODE AUTH ────────────────────────────────────────────────────────
+// Set ACCESS_CODE in Render environment variables — never hardcode here
+// Example: ACCESS_CODE=ConcentrixSOC2026
+const ACCESS_CODE = process.env.ACCESS_CODE || "";
+
+app.post("/auth/verify", async (req, res) => {
+  const { code } = req.body;
+  if (!code) return res.status(400).json({ valid: false, error: "No code provided" });
+  if (!ACCESS_CODE) return res.status(503).json({ valid: false, error: "Access code not configured on server" });
+  // Compare submitted code to server-side code (trim + case-insensitive)
+  const valid = code.trim() === ACCESS_CODE.trim();
+  // Log attempt (no sensitive data logged)
+  console.log(`[AUTH] Login attempt: ${valid ? "✅ SUCCESS" : "❌ FAILED"} — ${new Date().toISOString()}`);
+  res.json({ valid });
+});
+
+
 
 app.get("/", (req,res)=>res.json({
   name:"Security Advisory Proxy v3",
