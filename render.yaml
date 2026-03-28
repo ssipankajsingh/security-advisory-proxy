@@ -1,1 +1,13 @@
-
+# render.yaml — drop this in your repo root to auto-deploy on Render.com (free tier)
+services:
+  - type: web
+    name: security-advisory-proxy
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3001
