@@ -1,25 +1,26 @@
 /**
- * Security Advisory RSS Proxy Server — v3
- * Added: Email Digest via SendGrid (scheduled + manual)
+ * Security Advisory RSS Proxy Server — v3 Final
+ * Features: RSS fetching, Email Digest (SendGrid), Team Auth
  */
 
-const express    = require("express");
-const cors       = require("cors");
-const axios      = require("axios");
-const xml2js     = require("xml2js");
-const NodeCache  = require("node-cache");
-const cron       = require("node-cron");
-const sgMail     = require("@sendgrid/mail");
+const express   = require("express");
+const cors      = require("cors");
+const axios     = require("axios");
+const xml2js    = require("xml2js");
+const NodeCache = require("node-cache");
+const cron      = require("node-cron");
+const sgMail    = require("@sendgrid/mail");
 
 const app   = express();
 const cache = new NodeCache({ stdTTL: 3600 });
 const PORT  = process.env.PORT || 3001;
 
-// ─── SENDGRID CONFIG (set these in Render environment variables) ─────────────
+// ─── ENV VARS (set in Render Environment tab) ─────────────────────────────────
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || "";
+const ACCESS_CODE      = process.env.ACCESS_CODE || "";
 if (SENDGRID_API_KEY) sgMail.setApiKey(SENDGRID_API_KEY);
 
-// ─── CORS ────────────────────────────────────────────────────────────────────
+// ─── CORS ─────────────────────────────────────────────────────────────────────
 const ALLOWED_ORIGINS = [
   "https://ssipankajsingh.github.io",
   "http://localhost:3000",
@@ -34,7 +35,7 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// ─── TRUSTED FEED REGISTRY ───────────────────────────────────────────────────
+// ─── TRUSTED FEED REGISTRY ────────────────────────────────────────────────────
 const TRUSTED_FEEDS = {
   cisa_alerts:   "https://www.cisa.gov/cybersecurity-advisories/all.xml",
   ncsc_uk:       "https://www.ncsc.gov.uk/api/1/services/v1/report-rss-feed.xml",
@@ -87,14 +88,14 @@ const VENDOR_NAMES = {
   ncsc_uk:"NCSC UK", exploit_db:"Exploit-DB", zdi_published:"ZDI", zdi_upcoming:"ZDI",
 };
 
-// ─── FEED PARSING HELPERS ────────────────────────────────────────────────────
+// ─── FEED PARSING HELPERS ─────────────────────────────────────────────────────
 const parser = new xml2js.Parser({ explicitArray:false, ignoreAttrs:false, strict:false, trim:true });
 
 function parseSeverity(t=""){
   if(t.match(/critical|cvss[:\s]+([89]\.|10)/i)) return "Critical";
-  if(t.match(/\bhigh\b|cvss[:\s]+[78]\./i))      return "High";
-  if(t.match(/medium|moderate/i))                 return "Medium";
-  if(t.match(/\blow\b/i))                         return "Low";
+  if(t.match(/\bhigh\b|cvss[:\s]+[78]\./i))       return "High";
+  if(t.match(/medium|moderate/i))                  return "Medium";
+  if(t.match(/\blow\b/i))                          return "Low";
   return "Unknown";
 }
 function parseCVSS(t=""){const m=t.match(/cvss[v23 ]*[:\s]+([0-9]{1,2}\.[0-9])/i);return m?parseFloat(m[1]):null;}
@@ -166,7 +167,7 @@ async function fetchFeed(sourceId, url){
   if(ct.includes("json")||url.endsWith(".json")){
     if(sourceId==="mozilla")     normalized=parseMozillaJSON(res.data);
     else if(sourceId==="redhat") normalized=parseRedHatJSON(res.data);
-  } else {
+  }else{
     const raw=await parser.parseStringPromise(typeof res.data==="string"?res.data:String(res.data));
     const items=raw?.rss?.channel?.item||raw?.feed?.entry||raw?.["rdf:RDF"]?.item||raw?.channel?.item;
     normalized=normalizeItems(sourceId, items||[], VENDOR_NAMES[sourceId]||sourceId);
@@ -197,7 +198,7 @@ async function fetchAllFeeds(){
   return deduped;
 }
 
-// ─── EMAIL HTML TEMPLATE (no AI required) ───────────────────────────────────
+// ─── EMAIL HTML TEMPLATE ──────────────────────────────────────────────────────
 function buildEmailHTML(advisories, date){
   const critical  = advisories.filter(a=>a.severity==="Critical");
   const zeroDays  = advisories.filter(a=>a.zeroDay);
@@ -205,11 +206,7 @@ function buildEmailHTML(advisories, date){
   const medium    = advisories.filter(a=>a.severity==="Medium");
   const sevColor  = {Critical:"#dc2626",High:"#ea580c",Medium:"#ca8a04",Low:"#16a34a",Unknown:"#6b7280"};
 
-  // Top critical + zero-day advisories table
-  const topAdvisories = advisories
-    .filter(a=>a.severity==="Critical"||a.zeroDay)
-    .slice(0,20);
-
+  const topAdvisories = advisories.filter(a=>a.severity==="Critical"||a.zeroDay).slice(0,20);
   const advisoryRows = topAdvisories.map(a=>`
     <tr style="border-bottom:1px solid #e5e7eb;">
       <td style="padding:10px 8px;white-space:nowrap;">
@@ -227,37 +224,30 @@ function buildEmailHTML(advisories, date){
       </td>
     </tr>`).join("");
 
-  // High severity section
   const highRows = high.slice(0,10).map(a=>`
     <tr style="border-bottom:1px solid #e5e7eb;">
-      <td style="padding:8px;">
-        <span style="background:#ea580c;color:#fff;border-radius:3px;padding:1px 6px;font-size:10px;font-weight:700;">HIGH</span>
-      </td>
+      <td style="padding:8px;"><span style="background:#ea580c;color:#fff;border-radius:3px;padding:1px 6px;font-size:10px;font-weight:700;">HIGH</span></td>
       <td style="padding:8px;font-size:12px;font-weight:600;color:#111827;">${a.id}</td>
       <td style="padding:8px;font-size:12px;color:#374151;">${a.title}</td>
       <td style="padding:8px;font-size:11px;color:#6b7280;">${a.vendor} · ${a.date}</td>
       <td style="padding:8px;text-align:center;">${a.url?`<a href="${a.url}" style="color:#2563eb;font-size:12px;">View →</a>`:""}</td>
     </tr>`).join("");
 
-  // Key recommendations based on top threats (rule-based, no AI)
-  const recommendations = [];
-  if(zeroDays.length>0) recommendations.push(`🚨 <strong>${zeroDays.length} zero-day vulnerability${zeroDays.length>1?"ies":""} detected</strong> — apply emergency patches immediately and check for signs of exploitation.`);
+  const recommendations=[];
+  if(zeroDays.length>0) recommendations.push(`🚨 <strong>${zeroDays.length} zero-day${zeroDays.length>1?"s":""} detected</strong> — apply emergency patches immediately and check for signs of exploitation.`);
   if(critical.some(a=>a.vendor==="Microsoft")) recommendations.push(`🔵 <strong>Microsoft patches available</strong> — prioritise Windows/Azure/Entra ID updates via WSUS/Intune.`);
-  if(critical.some(a=>a.vendor==="Cisco"||a.vendor==="Fortinet"||a.vendor==="Palo Alto")) recommendations.push(`🔴 <strong>Network infrastructure advisories</strong> — review firewall/VPN/router patches with network team before deployment.`);
-  if(critical.some(a=>a.vendor==="CrowdStrike"||a.vendor==="SentinelOne")) recommendations.push(`🛡️ <strong>Endpoint security updates</strong> — verify EDR agents are on latest version across all endpoints.`);
-  if(critical.some(a=>["AWS","Google Cloud","Azure","Okta"].includes(a.vendor))) recommendations.push(`☁️ <strong>Cloud/identity advisories</strong> — review cloud security settings and IAM configurations.`);
+  if(critical.some(a=>["Cisco","Fortinet","Palo Alto","SonicWall","Ivanti"].includes(a.vendor))) recommendations.push(`🔴 <strong>Network infrastructure advisories</strong> — review firewall/VPN patches with network team before deployment.`);
+  if(critical.some(a=>["CrowdStrike","SentinelOne","Sophos"].includes(a.vendor))) recommendations.push(`🛡️ <strong>Endpoint security updates</strong> — verify EDR agents are on latest version across all endpoints.`);
+  if(critical.some(a=>["AWS","Google Cloud","Google","Okta"].includes(a.vendor))) recommendations.push(`☁️ <strong>Cloud/identity advisories</strong> — review cloud security settings and IAM configurations.`);
   if(recommendations.length===0) recommendations.push(`✅ No critical zero-day threats today — continue routine patch management cycle.`);
 
   return `<!DOCTYPE html>
 <html>
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Security Advisory Digest — ${date}</title></head>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
 <body style="margin:0;padding:0;background:#f3f4f6;font-family:'Segoe UI',Arial,sans-serif;">
 <table width="100%" cellpadding="0" cellspacing="0" style="background:#f3f4f6;padding:24px 0;">
 <tr><td align="center">
 <table width="680" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.12);">
-
-  <!-- HEADER -->
   <tr><td style="background:linear-gradient(135deg,#1e3a5f 0%,#1e40af 100%);padding:24px 32px;">
     <table width="100%"><tr>
       <td>
@@ -271,8 +261,6 @@ function buildEmailHTML(advisories, date){
       </td>
     </tr></table>
   </td></tr>
-
-  <!-- STATS BAR -->
   <tr><td style="background:#1e3a5f;padding:14px 32px;">
     <table width="100%"><tr>
       ${[["Critical",critical.length,"#fca5a5"],["Zero-Days",zeroDays.length,"#c4b5fd"],["High",high.length,"#fdba74"],["Medium",medium.length,"#fde68a"],["Total",advisories.length,"#93c5fd"]].map(([l,v,c])=>`
@@ -282,24 +270,18 @@ function buildEmailHTML(advisories, date){
       </td>`).join("")}
     </tr></table>
   </td></tr>
-
-  <!-- RECOMMENDED ACTIONS -->
   <tr><td style="padding:24px 32px;border-bottom:1px solid #e5e7eb;">
     <div style="font-size:11px;font-weight:700;color:#6b7280;letter-spacing:1px;text-transform:uppercase;margin-bottom:12px;">✅ Recommended Actions</div>
     <div style="background:#f0fdf4;border-left:3px solid #16a34a;padding:14px 16px;border-radius:0 6px 6px 0;">
       ${recommendations.map(r=>`<div style="font-size:13px;color:#374151;line-height:1.7;margin-bottom:6px;">${r}</div>`).join("")}
     </div>
   </td></tr>
-
-  <!-- CRITICAL & ZERO-DAY TABLE -->
   ${topAdvisories.length>0?`
   <tr><td style="padding:24px 32px;border-bottom:1px solid #e5e7eb;">
-    <div style="font-size:11px;font-weight:700;color:#6b7280;letter-spacing:1px;text-transform:uppercase;margin-bottom:12px;">
-      ⚠️ Critical & Zero-Day Advisories (${topAdvisories.length})
-    </div>
-    <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:6px;overflow:hidden;font-size:13px;">
+    <div style="font-size:11px;font-weight:700;color:#6b7280;letter-spacing:1px;text-transform:uppercase;margin-bottom:12px;">⚠️ Critical & Zero-Day Advisories (${topAdvisories.length})</div>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:6px;overflow:hidden;">
       <thead><tr style="background:#fef2f2;">
-        <th style="padding:8px;font-size:11px;color:#dc2626;text-align:left;font-weight:700;">SEVERITY</th>
+        <th style="padding:8px;font-size:11px;color:#dc2626;text-align:left;font-weight:700;">SEV</th>
         <th style="padding:8px;font-size:11px;color:#6b7280;text-align:left;font-weight:600;">ID</th>
         <th style="padding:8px;font-size:11px;color:#6b7280;text-align:left;font-weight:600;">TITLE</th>
         <th style="padding:8px;font-size:11px;color:#6b7280;text-align:left;font-weight:600;">SUMMARY</th>
@@ -308,13 +290,9 @@ function buildEmailHTML(advisories, date){
       <tbody>${advisoryRows}</tbody>
     </table>
   </td></tr>`:""}
-
-  <!-- HIGH SEVERITY TABLE -->
   ${high.length>0?`
   <tr><td style="padding:24px 32px;border-bottom:1px solid #e5e7eb;">
-    <div style="font-size:11px;font-weight:700;color:#6b7280;letter-spacing:1px;text-transform:uppercase;margin-bottom:12px;">
-      🔶 High Severity Advisories (${Math.min(high.length,10)} shown)
-    </div>
+    <div style="font-size:11px;font-weight:700;color:#6b7280;letter-spacing:1px;text-transform:uppercase;margin-bottom:12px;">🔶 High Severity (${Math.min(high.length,10)} shown)</div>
     <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e5e7eb;border-radius:6px;overflow:hidden;">
       <thead><tr style="background:#fff7ed;">
         <th style="padding:8px;font-size:11px;color:#ea580c;text-align:left;font-weight:700;">SEV</th>
@@ -326,15 +304,11 @@ function buildEmailHTML(advisories, date){
       <tbody>${highRows}</tbody>
     </table>
   </td></tr>`:""}
-
-  <!-- FOOTER -->
   <tr><td style="background:#f9fafb;padding:16px 32px;border-top:1px solid #e5e7eb;">
     <table width="100%"><tr>
       <td style="font-size:11px;color:#9ca3af;line-height:1.6;">
         Concentrix Endpoint Security Team · Security Advisory Dashboard<br>
-        <a href="https://ssipankajsingh.github.io/security-advisory-dashboard/" style="color:#2563eb;text-decoration:none;">
-          🔗 View Full Dashboard & Filter by Severity/Vendor
-        </a>
+        <a href="https://ssipankajsingh.github.io/security-advisory-dashboard/" style="color:#2563eb;text-decoration:none;">🔗 View Full Dashboard</a>
       </td>
       <td align="right" style="font-size:11px;color:#9ca3af;vertical-align:top;">
         ${advisories.length} advisories · ${Object.keys(TRUSTED_FEEDS).length} sources<br>
@@ -342,7 +316,6 @@ function buildEmailHTML(advisories, date){
       </td>
     </tr></table>
   </td></tr>
-
 </table>
 </td></tr>
 </table>
@@ -350,9 +323,9 @@ function buildEmailHTML(advisories, date){
 </html>`;
 }
 
-// ─── EMAIL SENDER (no AI required) ───────────────────────────────────────────
+// ─── EMAIL SENDER ─────────────────────────────────────────────────────────────
 async function sendDigestEmail(config){
-  const { recipients, senderEmail, senderName } = config;
+  const {recipients, senderEmail, senderName} = config;
   if(!SENDGRID_API_KEY) throw new Error("SENDGRID_API_KEY not configured in Render environment variables");
   if(!recipients?.length) throw new Error("No recipients configured");
 
@@ -360,97 +333,85 @@ async function sendDigestEmail(config){
   const advisories = await fetchAllFeeds();
   const critCount  = advisories.filter(a=>a.severity==="Critical").length;
   const zdCount    = advisories.filter(a=>a.zeroDay).length;
-
-  const dateStr = new Date().toLocaleDateString("en-GB",{weekday:"long",year:"numeric",month:"long",day:"numeric"});
-  const html    = buildEmailHTML(advisories, dateStr);
-  const subject = `🛡️ Security Advisory Digest — ${dateStr}${critCount>0?` | ${critCount} Critical`:""}${zdCount>0?` | ${zdCount} Zero-Day`:""}`;
+  const dateStr    = new Date().toLocaleDateString("en-GB",{weekday:"long",year:"numeric",month:"long",day:"numeric"});
+  const html       = buildEmailHTML(advisories, dateStr);
+  const subject    = `🛡️ Security Advisory Digest — ${dateStr}${critCount>0?` | ${critCount} Critical`:""}${zdCount>0?` | ${zdCount} Zero-Day`:""}`;
 
   const msg = {
     to:      recipients,
-    from:    { email: senderEmail||"security-digest@concentrix-soc.com", name: senderName||"Concentrix SOC Dashboard" },
+    from:    {email: senderEmail||"security@concentrix-soc.com", name: senderName||"Concentrix SOC Dashboard"},
     subject,
     html,
-    text:    `Security Advisory Digest — ${dateStr}\n\nCritical: ${critCount} | Zero-Day: ${zdCount} | Total: ${advisories.length}\n\nView full dashboard: https://ssipankajsingh.github.io/security-advisory-dashboard/`,
-    headers: { "X-Priority": critCount>0?"1":"3", "Importance": critCount>0?"high":"normal" },
+    text:    `Security Advisory Digest — ${dateStr}\nCritical: ${critCount} | Zero-Day: ${zdCount} | Total: ${advisories.length}\n\nView dashboard: https://ssipankajsingh.github.io/security-advisory-dashboard/`,
+    headers: {"X-Priority": critCount>0?"1":"3", "Importance": critCount>0?"high":"normal"},
   };
 
   await sgMail.sendMultiple(msg);
   console.log(`📧 Digest sent to ${recipients.length} recipients`);
-  return { sent:true, recipients:recipients.length, criticalCount:critCount, zeroDayCount:zdCount };
+  return {sent:true, recipients:recipients.length, criticalCount:critCount, zeroDayCount:zdCount};
 }
 
-// ─── SCHEDULED DIGEST (cron) ─────────────────────────────────────────────────
-// Loaded from environment — DIGEST_SCHEDULE e.g. "0 8 * * *" = 8:00 AM UTC daily
-// Default: 8:00 AM UTC. Override via DIGEST_SCHEDULE env var in Render.
+// ─── SCHEDULER ───────────────────────────────────────────────────────────────
 let scheduledJob = null;
 
 function startSchedule(cronExpr, config){
-  if(scheduledJob){ scheduledJob.stop(); scheduledJob=null; }
+  if(scheduledJob){scheduledJob.stop();scheduledJob=null;}
   if(!cronExpr||cronExpr==="off") return;
   try{
-    scheduledJob=cron.schedule(cronExpr,async()=>{
+    scheduledJob=cron.schedule(cronExpr, async()=>{
       console.log(`⏰ Scheduled digest triggered: ${new Date().toISOString()}`);
-      try{ await sendDigestEmail(config); }
-      catch(e){ console.error("Scheduled digest failed:", e.message); }
-    },{ timezone:"UTC" });
+      try{await sendDigestEmail(config);}
+      catch(e){console.error("Scheduled digest failed:", e.message);}
+    },{timezone:"UTC"});
     console.log(`⏰ Digest scheduled: ${cronExpr} UTC`);
-  }catch(e){
-    console.error("Invalid cron expression:", e.message);
-  }
+  }catch(e){console.error("Invalid cron expression:", e.message);}
 }
 
-// ─── ACCESS CODE AUTH ────────────────────────────────────────────────────────
-// Set ACCESS_CODE in Render environment variables — never hardcode here
-// Example: ACCESS_CODE=ConcentrixSOC2026
-const ACCESS_CODE = process.env.ACCESS_CODE || "";
+// ─── ROUTES ──────────────────────────────────────────────────────────────────
 
-app.post("/auth/verify", async (req, res) => {
-  const { code } = req.body;
-  if (!code) return res.status(400).json({ valid: false, error: "No code provided" });
-  if (!ACCESS_CODE) return res.status(503).json({ valid: false, error: "Access code not configured on server" });
-  // Compare submitted code to server-side code (trim + case-insensitive)
-  const valid = code.trim() === ACCESS_CODE.trim();
-  // Log attempt (no sensitive data logged)
-  console.log(`[AUTH] Login attempt: ${valid ? "✅ SUCCESS" : "❌ FAILED"} — ${new Date().toISOString()}`);
-  res.json({ valid });
-});
-
-
-
-app.get("/", (req,res)=>res.json({
+// Root
+app.get("/",(req,res)=>res.json({
   name:"Security Advisory Proxy v3",
   feeds:Object.keys(TRUSTED_FEEDS).length,
   emailEnabled:!!SENDGRID_API_KEY,
-  endpoints:["/health","/sources","/feed/:sourceId","/feeds/all","/digest/send","/digest/schedule"],
+  authEnabled:!!ACCESS_CODE,
+  endpoints:["/health","/sources","/feed/:sourceId","/feeds/all","/auth/verify","/digest/send","/digest/schedule","/digest/status","/cache/clear"],
 }));
 
+// Health
 app.get("/health",(req,res)=>res.json({
-  status:"ok", sources:Object.keys(TRUSTED_FEEDS).length,
-  cached:cache.keys().length, uptime:Math.round(process.uptime())+"s",
+  status:"ok",
+  sources:Object.keys(TRUSTED_FEEDS).length,
+  cached:cache.keys().length,
+  uptime:Math.round(process.uptime())+"s",
   time:new Date().toISOString(),
   emailEnabled:!!SENDGRID_API_KEY,
+  authEnabled:!!ACCESS_CODE,
   scheduleActive:!!scheduledJob,
 }));
 
+// Sources list
 app.get("/sources",(req,res)=>res.json(
-  Object.keys(TRUSTED_FEEDS).map(id=>({ id, vendor:VENDOR_NAMES[id]||id, url:TRUSTED_FEEDS[id], cached:cache.has(id) }))
+  Object.keys(TRUSTED_FEEDS).map(id=>({id, vendor:VENDOR_NAMES[id]||id, url:TRUSTED_FEEDS[id], cached:cache.has(id)}))
 ));
 
+// Single feed
 app.get("/feed/:sourceId",async(req,res)=>{
-  const{sourceId}=req.params;
+  const {sourceId}=req.params;
   const url=TRUSTED_FEEDS[sourceId];
-  if(!url)return res.status(404).json({error:"Unknown source: "+sourceId});
+  if(!url) return res.status(404).json({error:"Unknown source: "+sourceId});
   try{
     const items=await fetchFeed(sourceId,url);
-    res.json({sourceId,vendor:VENDOR_NAMES[sourceId]||sourceId,count:items.length,items});
+    res.json({sourceId, vendor:VENDOR_NAMES[sourceId]||sourceId, count:items.length, items});
   }catch(err){
     console.error(`[${sourceId}] Error:`,err.message);
-    res.status(502).json({error:"Failed to fetch feed",detail:err.message,sourceId});
+    res.status(502).json({error:"Failed to fetch feed", detail:err.message, sourceId});
   }
 });
 
+// All feeds
 app.post("/feeds/all",async(req,res)=>{
-  const{sources=Object.keys(TRUSTED_FEEDS)}=req.body;
+  const {sources=Object.keys(TRUSTED_FEEDS)}=req.body;
   const enabled=sources.filter(id=>TRUSTED_FEEDS[id]);
   const results=[];const errors=[];
   await Promise.allSettled(enabled.map(async id=>{
@@ -467,15 +428,27 @@ app.post("/feeds/all",async(req,res)=>{
     const dd=new Date(b.date)-new Date(a.date);
     return dd!==0?dd:(sevOrder[a.severity]??4)-(sevOrder[b.severity]??4);
   });
-  res.json({fetched:enabled.length,succeeded:enabled.length-errors.length,failed:errors.length,errors,total:deduped.length,timestamp:new Date().toISOString(),items:deduped});
+  res.json({fetched:enabled.length, succeeded:enabled.length-errors.length, failed:errors.length, errors, total:deduped.length, timestamp:new Date().toISOString(), items:deduped});
 });
 
-// Manual digest send
+// ─── AUTH ─────────────────────────────────────────────────────────────────────
+app.post("/auth/verify",(req,res)=>{
+  const {code}=req.body;
+  if(!code) return res.status(400).json({valid:false, error:"No code provided"});
+  if(!ACCESS_CODE) return res.status(503).json({valid:false, error:"Access code not configured on server — set ACCESS_CODE in Render environment"});
+  const valid=code.trim()===ACCESS_CODE.trim();
+  console.log(`[AUTH] Login attempt: ${valid?"✅ SUCCESS":"❌ FAILED"} — ${new Date().toISOString()}`);
+  res.json({valid});
+});
+
+// ─── EMAIL ROUTES ─────────────────────────────────────────────────────────────
+
+// Manual send
 app.post("/digest/send",async(req,res)=>{
-  const{recipients,senderEmail,senderName}=req.body;
+  const {recipients, senderEmail, senderName}=req.body;
   if(!recipients?.length) return res.status(400).json({error:"recipients array required"});
   try{
-    const result=await sendDigestEmail({recipients,senderEmail,senderName});
+    const result=await sendDigestEmail({recipients, senderEmail, senderName});
     res.json(result);
   }catch(err){
     console.error("Digest send error:",err.message);
@@ -483,25 +456,36 @@ app.post("/digest/send",async(req,res)=>{
   }
 });
 
-// Configure scheduled digest
-app.post("/digest/schedule",async(req,res)=>{
-  const{cronExpr,recipients,senderEmail,senderName,enabled}=req.body;
-  if(enabled===false){ if(scheduledJob){scheduledJob.stop();scheduledJob=null;} return res.json({scheduled:false,message:"Schedule disabled"}); }
+// Schedule
+app.post("/digest/schedule",(req,res)=>{
+  const {cronExpr, recipients, senderEmail, senderName, enabled}=req.body;
+  if(enabled===false){
+    if(scheduledJob){scheduledJob.stop();scheduledJob=null;}
+    return res.json({scheduled:false, message:"Schedule disabled"});
+  }
   if(!recipients?.length) return res.status(400).json({error:"recipients array required"});
   if(!cronExpr) return res.status(400).json({error:"cronExpr required (e.g. '0 8 * * *' for 8AM UTC)"});
-  startSchedule(cronExpr,{recipients,senderEmail,senderName});
-  res.json({scheduled:true,cronExpr,recipients,message:`Digest scheduled: ${cronExpr} UTC`});
+  startSchedule(cronExpr,{recipients, senderEmail, senderName});
+  res.json({scheduled:true, cronExpr, recipients, message:`Digest scheduled: ${cronExpr} UTC`});
 });
 
+// Digest status
 app.get("/digest/status",(req,res)=>res.json({
   scheduleActive:!!scheduledJob,
   sendgridConfigured:!!SENDGRID_API_KEY,
+  authConfigured:!!ACCESS_CODE,
 }));
 
-app.post("/cache/clear",(req,res)=>{cache.flushAll();res.json({cleared:true,time:new Date().toISOString()});});
+// Clear cache
+app.post("/cache/clear",(req,res)=>{
+  cache.flushAll();
+  res.json({cleared:true, time:new Date().toISOString()});
+});
 
+// ─── START ────────────────────────────────────────────────────────────────────
 app.listen(PORT,()=>{
   console.log(`\n🛡️  Security Advisory Proxy v3 running on port ${PORT}`);
   console.log(`   Sources : ${Object.keys(TRUSTED_FEEDS).length} configured`);
-  console.log(`   Email   : ${SENDGRID_API_KEY?"✅ SendGrid configured":"⚠️  Set SENDGRID_API_KEY env var"}\n`);
+  console.log(`   Email   : ${SENDGRID_API_KEY?"✅ SendGrid configured":"⚠️  Set SENDGRID_API_KEY env var"}`);
+  console.log(`   Auth    : ${ACCESS_CODE?"✅ Access code configured":"⚠️  Set ACCESS_CODE env var"}\n`);
 });
