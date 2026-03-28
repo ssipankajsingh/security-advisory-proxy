@@ -37,55 +37,93 @@ app.use(express.json());
 
 // ─── TRUSTED FEED REGISTRY ────────────────────────────────────────────────────
 const TRUSTED_FEEDS = {
-  cisa_alerts:   "https://www.cisa.gov/cybersecurity-advisories/all.xml",
-  ncsc_uk:       "https://www.ncsc.gov.uk/api/1/services/v1/report-rss-feed.xml",
-  exploit_db:    "https://www.exploit-db.com/rss.xml",
-  zdi_published: "https://www.zerodayinitiative.com/rss/published/",
-  zdi_upcoming:  "https://www.zerodayinitiative.com/rss/upcoming/",
-  msrc:          "https://api.msrc.microsoft.com/update-guide/rss",
-  msrc_blog:     "https://msrc.microsoft.com/blog/rss/",
-  ubuntu:        "https://ubuntu.com/security/notices/rss.xml",
-  redhat:        "https://access.redhat.com/hydra/rest/securitydata/cve.json?after=2024-01-01&severity=critical&limit=20",
-  android:       "https://source.android.com/docs/security/bulletin/feed.xml",
-  cisco:         "https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml",
-  fortinet:      "https://www.fortiguard.com/rss/ir.xml",
-  paloalto:      "https://security.paloaltonetworks.com/rss.xml",
-  sonicwall:     "https://psirt.global.sonicwall.com/vuln-list/rss",
-  ivanti:        "https://forums.ivanti.com/servlet/JiveServlet/download/8399-3-18160/IvantiSecurityAdvisories.rss",
-  crowdstrike:   "https://www.crowdstrike.com/blog/feed/",
-  sentinelone:   "https://www.sentinelone.com/labs/feed/",
-  sophos:        "https://news.sophos.com/en-us/category/threat-research/feed/",
-  malwarebytes:  "https://www.malwarebytes.com/blog/feed/",
-  aws:           "https://aws.amazon.com/security/security-bulletins/feed/",
-  gcp:           "https://cloud.google.com/feeds/cloud-security-bulletins.xml",
-  chrome:        "https://chromereleases.googleblog.com/feeds/posts/default",
-  project_zero:  "https://googleprojectzero.blogspot.com/feeds/posts/default",
-  mozilla:       "https://www.mozilla.org/en-US/security/advisories/cve-feed.json",
-  openssl:       "https://www.openssl.org/news/openssl-security.rss",
-  apache:        "https://httpd.apache.org/security/vulnerabilities-httpd.xml",
-  oracle:        "https://www.oracle.com/security-alerts/rss.xml",
-  mandiant:      "https://www.mandiant.com/resources/blog/rss.xml",
-  talos:         "https://blog.talosintelligence.com/feeds/posts/default",
-  unit42:        "https://unit42.paloaltonetworks.com/feed/",
-  msft_ti:       "https://www.microsoft.com/en-us/security/blog/feed/",
-  krebs:         "https://krebsonsecurity.com/feed/",
-  bleeping:      "https://www.bleepingcomputer.com/feed/",
-  hackernews:    "https://feeds.feedburner.com/TheHackersNews",
-  secweek:       "https://feeds.feedburner.com/securityweek",
-  darkread:      "https://www.darkreading.com/rss/vulnerabilities-threats.xml",
+  // ── GOVERNMENT ──────────────────────────────────────────────────────────────
+  cisa_alerts:    "https://www.cisa.gov/cybersecurity-advisories/all.xml",
+  ncsc_uk:        "https://www.ncsc.gov.uk/api/1/services/v1/report-rss-feed.xml",
+  us_cert:        "https://www.cisa.gov/sites/default/files/feeds/bulletins.xml",
+  cert_eu:        "https://cert.europa.eu/publications/security-advisories/feed",
+
+  // ── CVE DATABASES ───────────────────────────────────────────────────────────
+  exploit_db:     "https://www.exploit-db.com/rss.xml",
+  zdi_published:  "https://www.zerodayinitiative.com/rss/published/",
+  zdi_upcoming:   "https://www.zerodayinitiative.com/rss/upcoming/",
+
+  // ── OS & PLATFORM ───────────────────────────────────────────────────────────
+  msrc:           "https://api.msrc.microsoft.com/update-guide/rss",
+  msrc_blog:      "https://msrc.microsoft.com/blog/rss/",
+  ms_azure:       "https://azurecomcdn.azureedge.net/en-us/updates/feed/",
+  ubuntu:         "https://ubuntu.com/security/notices/rss.xml",
+  redhat:         "https://access.redhat.com/hydra/rest/securitydata/cve.json?after=2024-01-01&severity=critical&limit=20",
+  android:        "https://source.android.com/docs/security/bulletin/feed.xml",
+
+  // ── NETWORK & FIREWALL ──────────────────────────────────────────────────────
+  cisco:          "https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml",
+  fortinet:       "https://www.fortiguard.com/rss/ir.xml",
+  paloalto:       "https://security.paloaltonetworks.com/rss.xml",
+  sonicwall:      "https://psirt.global.sonicwall.com/vuln-list/rss",
+  ivanti:         "https://forums.ivanti.com/servlet/JiveServlet/download/8399-3-18160/IvantiSecurityAdvisories.rss",
+  f5:             "https://my.f5.com/manage/s/article/K4602?rss=yes",
+  checkpoint:     "https://advisories.checkpoint.com/rss",
+  juniper:        "https://kb.juniper.net/InfoCenter/index?page=content&channel=SECURITY_ADVISORIES&rss=true",
+
+  // ── ENDPOINT SECURITY ───────────────────────────────────────────────────────
+  crowdstrike:    "https://www.crowdstrike.com/blog/feed/",
+  sentinelone:    "https://www.sentinelone.com/labs/feed/",
+  sophos:         "https://news.sophos.com/en-us/category/threat-research/feed/",
+  malwarebytes:   "https://www.malwarebytes.com/blog/feed/",
+  trendmicro:     "https://feeds.trendmicro.com/Anti-MalwareBlog/",
+  eset:           "https://www.welivesecurity.com/feed/",
+
+  // ── CLOUD ───────────────────────────────────────────────────────────────────
+  aws:            "https://aws.amazon.com/security/security-bulletins/feed/",
+  gcp:            "https://cloud.google.com/feeds/cloud-security-bulletins.xml",
+  chrome:         "https://chromereleases.googleblog.com/feeds/posts/default",
+  project_zero:   "https://googleprojectzero.blogspot.com/feeds/posts/default",
+  cloudflare:     "https://blog.cloudflare.com/tag/security/rss/",
+
+  // ── BROWSER / MIDDLEWARE ────────────────────────────────────────────────────
+  mozilla:        "https://www.mozilla.org/en-US/security/advisories/cve-feed.json",
+  openssl:        "https://www.openssl.org/news/openssl-security.rss",
+  apache:         "https://httpd.apache.org/security/vulnerabilities-httpd.xml",
+  oracle:         "https://www.oracle.com/security-alerts/rss.xml",
+  vmware:         "https://blogs.vmware.com/security/feed",
+
+  // ── YOUR STACK ──────────────────────────────────────────────────────────────
+  solarwinds:     "https://www.solarwinds.com/trust-center/security-advisories/feed",
+  proofpoint:     "https://www.proofpoint.com/us/rss.xml",
+
+  // ── THREAT INTELLIGENCE ─────────────────────────────────────────────────────
+  mandiant:       "https://www.mandiant.com/resources/blog/rss.xml",
+  talos:          "https://blog.talosintelligence.com/feeds/posts/default",
+  unit42:         "https://unit42.paloaltonetworks.com/feed/",
+  msft_ti:        "https://www.microsoft.com/en-us/security/blog/feed/",
+  secureworks:    "https://www.secureworks.com/blog/rss",
+
+  // ── SECURITY NEWS ───────────────────────────────────────────────────────────
+  krebs:          "https://krebsonsecurity.com/feed/",
+  bleeping:       "https://www.bleepingcomputer.com/feed/",
+  hackernews:     "https://feeds.feedburner.com/TheHackersNews",
+  secweek:        "https://feeds.feedburner.com/securityweek",
+  darkread:       "https://www.darkreading.com/rss/vulnerabilities-threats.xml",
+  helpnet:        "https://helpnetsecurity.com/feed/",
 };
 
 const VENDOR_NAMES = {
-  msrc:"Microsoft", msrc_blog:"Microsoft", ubuntu:"Ubuntu", redhat:"Red Hat",
-  android:"Google", cisco:"Cisco", fortinet:"Fortinet", paloalto:"Palo Alto",
-  sonicwall:"SonicWall", ivanti:"Ivanti", crowdstrike:"CrowdStrike",
+  msrc:"Microsoft", msrc_blog:"Microsoft", ms_azure:"Microsoft", ubuntu:"Ubuntu",
+  redhat:"Red Hat", android:"Google", cisco:"Cisco", fortinet:"Fortinet",
+  paloalto:"Palo Alto", sonicwall:"SonicWall", ivanti:"Ivanti", f5:"F5",
+  checkpoint:"Check Point", juniper:"Juniper", crowdstrike:"CrowdStrike",
   sentinelone:"SentinelOne", sophos:"Sophos", malwarebytes:"Malwarebytes",
-  aws:"AWS", gcp:"Google Cloud", chrome:"Google", project_zero:"Google",
+  trendmicro:"Trend Micro", eset:"ESET", aws:"AWS", gcp:"Google Cloud",
+  chrome:"Google", project_zero:"Google", cloudflare:"Cloudflare",
   mozilla:"Mozilla", openssl:"OpenSSL", apache:"Apache", oracle:"Oracle",
+  vmware:"Broadcom/VMware", solarwinds:"SolarWinds", proofpoint:"Proofpoint",
   mandiant:"Mandiant", talos:"Cisco Talos", unit42:"Palo Alto", msft_ti:"Microsoft",
-  krebs:"KrebsOnSecurity", bleeping:"BleepingComputer", hackernews:"The Hacker News",
-  secweek:"SecurityWeek", darkread:"Dark Reading", cisa_alerts:"CISA",
-  ncsc_uk:"NCSC UK", exploit_db:"Exploit-DB", zdi_published:"ZDI", zdi_upcoming:"ZDI",
+  secureworks:"Secureworks", krebs:"KrebsOnSecurity", bleeping:"BleepingComputer",
+  hackernews:"The Hacker News", secweek:"SecurityWeek", darkread:"Dark Reading",
+  helpnet:"Help Net Security", cisa_alerts:"CISA", ncsc_uk:"NCSC UK",
+  us_cert:"US-CERT", cert_eu:"CERT-EU", exploit_db:"Exploit-DB",
+  zdi_published:"ZDI", zdi_upcoming:"ZDI",
 };
 
 // ─── FEED PARSING HELPERS ─────────────────────────────────────────────────────
