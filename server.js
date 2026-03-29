@@ -310,7 +310,9 @@ function normaliseEntry(entry, source, type) {
 
 // ─── AUTH MIDDLEWARE ──────────────────────────────────────────────────────────
 function requireAuth(req, res, next) {
-  const token = req.headers["x-access-code"] || req.body?.accessCode;
+  const token = req.headers["x-access-code"]
+             || req.body?.accessCode
+             || req.body?.code;
   if (!ACCESS_CODE || token === ACCESS_CODE) return next();
   res.status(401).json({ error: "Unauthorized" });
 }
@@ -346,14 +348,15 @@ app.get("/health", (req, res) => {
   });
 });
 
-// Auth verify
+// Auth verify — accepts both 'code' and 'accessCode' fields for compatibility
 app.post("/auth/verify", (req, res) => {
-  const { accessCode } = req.body;
-  console.log(`[AUTH] Login attempt: ${accessCode === ACCESS_CODE ? "✅ SUCCESS" : "❌ FAILED"} — ${new Date().toISOString()}`);
-  if (!ACCESS_CODE || accessCode === ACCESS_CODE) {
-    res.json({ success: true });
+  const submitted = (req.body?.code || req.body?.accessCode || "").trim();
+  const valid = !ACCESS_CODE || submitted === ACCESS_CODE.trim();
+  console.log(`[AUTH] Login attempt: ${valid ? "✅ SUCCESS" : "❌ FAILED"} — ${new Date().toISOString()}`);
+  if (valid) {
+    res.json({ valid: true, success: true });
   } else {
-    res.status(401).json({ success: false, error: "Invalid access code" });
+    res.status(401).json({ valid: false, success: false, error: "Invalid access code" });
   }
 });
 
