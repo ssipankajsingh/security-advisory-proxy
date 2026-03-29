@@ -109,22 +109,30 @@ const TRUSTED_FEEDS = {
 };
 
 const VENDOR_NAMES = {
-  cisa_kev:"CISA", cisa_alerts:"CISA", ncsc_uk:"NCSC UK", us_cert:"US-CERT", cert_eu:"CERT-EU",
-  nvd:"NIST", cvedetails:"CVEdetails", exploit_db:"Exploit-DB", zdi_published:"ZDI", zdi_upcoming:"ZDI",
-  msrc:"Microsoft", msrc_blog:"Microsoft", ms_azure:"Microsoft", apple:"Apple",
-  redhat:"Red Hat", ubuntu:"Ubuntu", debian:"Debian", android:"Google",
+  // Aggregators
+  cvefeed_all:"CVEFeed.io", cvefeed_critical:"CVEFeed.io", github_advisories:"GitHub",
+  cisa_kev:"CISA", cisa_alerts:"CISA", ncsc_uk:"NCSC UK",
+  // CVE DBs
+  exploit_db:"Exploit-DB", zdi_published:"ZDI", zdi_upcoming:"ZDI",
+  // OS & Platform
+  msrc:"Microsoft", msrc_blog:"Microsoft", ms_azure:"Microsoft",
+  ubuntu:"Ubuntu", redhat:"Red Hat",
+  // Network
   cisco:"Cisco", fortinet:"Fortinet", paloalto:"Palo Alto", juniper:"Juniper",
-  sonicwall:"SonicWall", f5:"F5", checkpoint:"Check Point", aruba:"HPE/Aruba", ivanti:"Ivanti",
+  sonicwall:"SonicWall", f5:"F5", ivanti:"Ivanti",
+  // Endpoint
   crowdstrike:"CrowdStrike", sentinelone:"SentinelOne", sophos:"Sophos",
-  trendmicro:"Trend Micro", malwarebytes:"Malwarebytes", eset:"ESET",
-  aws:"AWS", gcp:"Google Cloud", chrome:"Google", project_zero:"Google",
-  cloudflare:"Cloudflare", okta:"Okta",
-  mozilla:"Mozilla", openssl:"OpenSSL", apache:"Apache", nginx:"NGINX/F5",
-  oracle:"Oracle", vmware:"Broadcom/VMware",
-  cortex_xdr:"Palo Alto", crowdstrike_edr:"CrowdStrike", proofpoint:"Proofpoint",
-  solarwinds:"SolarWinds",
-  cisa_ti:"CISA", recorded_future:"Recorded Future", mandiant:"Mandiant",
-  secureworks:"Secureworks", talos:"Cisco Talos", unit42:"Palo Alto", msft_ti:"Microsoft",
+  malwarebytes:"Malwarebytes", eset:"ESET",
+  // Cloud
+  aws:"AWS", gcp:"Google Cloud", chrome:"Google", project_zero:"Google", cloudflare:"Cloudflare",
+  // Browser/Middleware
+  mozilla:"Mozilla", openssl:"OpenSSL", apache:"Apache", oracle:"Oracle", vmware:"Broadcom/VMware",
+  // Your Stack
+  cortex_xdr:"Palo Alto", crowdstrike_edr:"CrowdStrike", proofpoint:"Proofpoint", solarwinds:"SolarWinds",
+  // Threat Intel
+  mandiant:"Mandiant", talos:"Cisco Talos", unit42:"Palo Alto",
+  msft_ti:"Microsoft", secureworks:"Secureworks", recorded_future:"Recorded Future",
+  // News
   krebs:"KrebsOnSecurity", bleeping:"BleepingComputer", hackernews:"The Hacker News",
   secweek:"SecurityWeek", darkread:"Dark Reading", helpnet:"HelpNet",
 };
