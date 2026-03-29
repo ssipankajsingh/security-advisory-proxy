@@ -39,11 +39,7 @@ const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || "";
 const ACCESS_CODE      = process.env.ACCESS_CODE      || "";
 if (SENDGRID_API_KEY) sgMail.setApiKey(SENDGRID_API_KEY);
 
-// ─── STARTUP LOG ─────────────────────────────────────────────────────────────
-console.log(`🛡️  Security Advisory Proxy v5 running on port ${PORT}`);
-console.log(`   Sources : 68 configured`);
-console.log(`   Email   : ${SENDGRID_API_KEY ? "✅ SendGrid configured" : "⚠️  No SendGrid key"}`);
-console.log(`   Auth    : ${ACCESS_CODE      ? "✅ Access code configured" : "⚠️  No access code set"}`);
+// ─── STARTUP LOG (printed after TRUSTED_FEEDS defined below) ─────────────────
 
 // ─── CORS ─────────────────────────────────────────────────────────────────────
 const ALLOWED_ORIGINS = [
@@ -129,12 +125,13 @@ const TRUSTED_FEEDS = {
   vmware:       "https://www.vmware.com/security/advisories/rss.xml",
   trendmicro:   "https://www.trendmicro.com/vinfo/us/security/rss/news", // ✅ FIXED
 
-  // ══ ENTERPRISE SECURITY TOOLS (5) ════════════════════════════════════════
+  // ══ ENTERPRISE SECURITY TOOLS (6) ════════════════════════════════════════
   proofpoint:   "https://www.proofpoint.com/us/rss.xml",
   okta:         "https://trust.okta.com/feed/",                         // ✅ FIXED
   solarwinds:   "https://www.solarwinds.com/rssfeed/security-advisories.rss",
   splunk:       "https://advisory.splunk.com/feed.xml",
   claroty:      "https://claroty.com/blog/feed",                        // ✅ REPLACED forescout
+  malwarebytes: "https://www.malwarebytes.com/blog/feed/",              // ✅ 68th source
 
   // ══ THREAT INTEL & NEWS (13) ═════════════════════════════════════════════
   krebs:        "https://krebsonsecurity.com/feed/",
@@ -151,6 +148,13 @@ const TRUSTED_FEEDS = {
   recorded_fut: "https://isc.sans.edu/rssfeed_full.xml",               // ISC SANS full feed
   nvd_recent:   "https://nvd.nist.gov/feeds/xml/cve/misc/nvd-rss-analyzed.xml", // ✅ FIXED NVD
 };
+
+// ─── STARTUP LOG ─────────────────────────────────────────────────────────────
+const SOURCE_COUNT = Object.keys(TRUSTED_FEEDS).length;
+console.log(`🛡️  Security Advisory Proxy v5 running on port ${PORT}`);
+console.log(`   Sources : ${SOURCE_COUNT} configured`);
+console.log(`   Email   : ${SENDGRID_API_KEY ? "✅ SendGrid configured" : "⚠️  No SendGrid key"}`);
+console.log(`   Auth    : ${ACCESS_CODE      ? "✅ Access code configured" : "⚠️  No access code set"}`);
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────────
 const parser = new xml2js.Parser({ explicitArray: false, ignoreAttrs: false });
@@ -313,12 +317,31 @@ function requireAuth(req, res, next) {
 
 // ─── ROUTES ───────────────────────────────────────────────────────────────────
 
+// Root route — friendly status page instead of "Cannot GET /"
+app.get("/", (req, res) => {
+  res.json({
+    name:      "Security Advisory Proxy",
+    version:   "v5",
+    status:    "running",
+    sources:   SOURCE_COUNT,
+    uptime:    Math.floor(process.uptime()),
+    endpoints: [
+      "GET  /health",
+      "POST /auth/verify",
+      "GET  /sources",
+      "GET  /advisories",
+      "GET  /advisories/critical",
+      "POST /email-digest",
+    ],
+  });
+});
+
 // Health check — used by UptimeRobot to keep service awake
 app.get("/health", (req, res) => {
   res.json({
     status:  "ok",
     version: "v5",
-    sources: Object.keys(TRUSTED_FEEDS).length,
+    sources: SOURCE_COUNT,
     uptime:  Math.floor(process.uptime()),
   });
 });
