@@ -394,7 +394,7 @@ app.get("/advisories", requireAuth, async (req, res) => {
     res.json({
       total:      advisories.length,
       generated:  new Date().toISOString(),
-      advisories: advisories.slice(0, 500), // cap response
+      advisories: advisories.slice(0, 1000), // cap response
     });
   } catch (err) {
     console.error("Error fetching advisories:", err.message);
