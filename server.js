@@ -596,6 +596,139 @@ if (SENDGRID_API_KEY && process.env.DIGEST_EMAIL) {
   console.log(`   Digest : ✅ Scheduled daily at 07:30 UTC → ${process.env.DIGEST_EMAIL}`);
 }
 
+// ─── TEAMS WEBHOOK ───────────────────────────────────────────────────────────
+const TEAMS_WEBHOOK = process.env.TEAMS_WEBHOOK || "";
+console.log(`   Teams   : ${TEAMS_WEBHOOK ? "✅ Webhook configured" : "⚠️  No Teams webhook (set TEAMS_WEBHOOK env var)"}`);
+
+async function sendTeamsNotification(webhookUrl, advisories) {
+  const critical = advisories.filter(a => a.severity === "Critical");
+  const zeroDays = advisories.filter(a => a.zeroDay);
+  const high     = advisories.filter(a => a.severity === "High");
+  const today    = new Date().toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+
+  // Build facts list — top 8 critical/zero-day items
+  const topItems = [...zeroDays, ...critical]
+    .filter((a, i, arr) => arr.findIndex(x => x.id === a.id) === i)
+    .slice(0, 8);
+
+  const facts = topItems.map(a => ({
+    name: `${a.zeroDay ? "🔴 0-DAY" : "🟠 CRITICAL"} — ${a.source || a.vendor || "Unknown"}`,
+    value: `${a.title?.slice(0, 100) || a.id}${a.cve ? ` (${a.cve})` : ""}`,
+  }));
+
+  // Adaptive Card payload for Teams
+  const payload = {
+    type: "message",
+    attachments: [{
+      contentType: "application/vnd.microsoft.card.adaptive",
+      content: {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        type: "AdaptiveCard",
+        version: "1.4",
+        body: [
+          {
+            type: "Container",
+            style: zeroDays.length > 0 ? "attention" : "warning",
+            items: [{
+              type: "ColumnSet",
+              columns: [
+                {
+                  type: "Column", width: "auto",
+                  items: [{ type: "TextBlock", text: "🛡️", size: "ExtraLarge" }]
+                },
+                {
+                  type: "Column", width: "stretch",
+                  items: [
+                    { type: "TextBlock", text: "Security Advisory Alert", weight: "Bolder", size: "Large", color: zeroDays.length > 0 ? "Attention" : "Warning" },
+                    { type: "TextBlock", text: `Concentrix Endpoint Security · ${today}`, size: "Small", isSubtle: true, spacing: "None" }
+                  ]
+                }
+              ]
+            }]
+          },
+          {
+            type: "ColumnSet",
+            columns: [
+              { type: "Column", width: "stretch", items: [{ type: "TextBlock", text: `**${advisories.length}**\nTotal`, wrap: true, horizontalAlignment: "Center" }] },
+              { type: "Column", width: "stretch", items: [{ type: "TextBlock", text: `**${critical.length}**\nCritical`, wrap: true, horizontalAlignment: "Center", color: "Attention" }] },
+              { type: "Column", width: "stretch", items: [{ type: "TextBlock", text: `**${high.length}**\nHigh", wrap: true, horizontalAlignment: "Center", color: "Warning" }] },
+              { type: "Column", width: "stretch", items: [{ type: "TextBlock", text: `**${zeroDays.length}**\nZero-Days`, wrap: true, horizontalAlignment: "Center", color: zeroDays.length > 0 ? "Attention" : "Default" }] },
+            ]
+          },
+          ...(facts.length > 0 ? [{
+            type: "Container",
+            style: "emphasis",
+            items: [
+              { type: "TextBlock", text: zeroDays.length > 0 ? "⚠️ Immediate Action Required" : "Top Critical Advisories", weight: "Bolder", size: "Medium" },
+              { type: "FactSet", facts }
+            ]
+          }] : []),
+          {
+            type: "ActionSet",
+            actions: [{
+              type: "Action.OpenUrl",
+              title: "🔍 Open Dashboard",
+              url: "https://ssipankajsingh.github.io/security-advisory-dashboard/",
+              style: "positive"
+            }]
+          }
+        ]
+      }
+    }]
+  };
+
+  const resp = await axios.post(webhookUrl, payload, {
+    headers: { "Content-Type": "application/json" },
+    timeout: 10000,
+  });
+  return resp.status;
+}
+
+// Teams notify endpoint — called from dashboard
+app.post("/teams-notify", requireAuth, async (req, res) => {
+  const webhookUrl = req.body?.webhookUrl || TEAMS_WEBHOOK;
+  if (!webhookUrl) {
+    return res.status(400).json({ error: "No Teams webhook URL provided. Pass webhookUrl in body or set TEAMS_WEBHOOK env var." });
+  }
+
+  try {
+    // Fetch fresh advisories for the notification
+    const promises = Object.entries(TRUSTED_FEEDS).map(([key, url]) =>
+      key === "cisa_kev" ? fetchCISAKEV() : fetchRSS(key, url)
+    );
+    const results    = await Promise.allSettled(promises);
+    let advisories   = results.flatMap(r => r.status === "fulfilled" ? r.value : []);
+    advisories       = dedupeAdvisories(advisories);
+
+    const status = await sendTeamsNotification(webhookUrl, advisories);
+    console.log(`[TEAMS] Notification sent — status ${status} — ${advisories.length} advisories`);
+    res.json({
+      success: true,
+      sent: advisories.length,
+      critical: advisories.filter(a => a.severity === "Critical").length,
+      zeroDays: advisories.filter(a => a.zeroDay).length,
+    });
+  } catch (err) {
+    console.error("[TEAMS] Error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── SCHEDULED TEAMS ALERT — 07:35 UTC (5 min after email) ──────────────────
+if (TEAMS_WEBHOOK) {
+  cron.schedule("35 7 * * *", async () => {
+    console.log("[CRON] Sending scheduled Teams notification...");
+    try {
+      const resp = await axios.post(`http://localhost:${PORT}/teams-notify`, {},
+        { headers: { "x-access-code": ACCESS_CODE } });
+      console.log("[CRON] Teams notified:", resp.data);
+    } catch (err) {
+      console.error("[CRON] Teams failed:", err.message);
+    }
+  });
+  console.log(`   Teams   : ✅ Scheduled daily at 07:35 UTC`);
+}
+
 // ─── START ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`\n✅ Proxy listening on port ${PORT}\n`);
