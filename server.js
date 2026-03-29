@@ -612,8 +612,8 @@ async function sendTeamsNotification(webhookUrl, advisories) {
     .slice(0, 8);
 
   const facts = topItems.map(a => ({
-    name: `${a.zeroDay ? "🔴 0-DAY" : "🟠 CRITICAL"} — ${a.source || a.vendor || "Unknown"}`,
-    value: `${a.title?.slice(0, 100) || a.id}${a.cve ? ` (${a.cve})` : ""}`,
+    name: (a.zeroDay ? "🔴 0-DAY" : "🟠 CRITICAL") + " — " + (a.source || a.vendor || "Unknown"),
+    value: (a.title ? a.title.slice(0, 100) : a.id) + (a.cve ? " (" + a.cve + ")" : ""),
   }));
 
   // Adaptive Card payload for Teams
@@ -640,7 +640,7 @@ async function sendTeamsNotification(webhookUrl, advisories) {
                   type: "Column", width: "stretch",
                   items: [
                     { type: "TextBlock", text: "Security Advisory Alert", weight: "Bolder", size: "Large", color: zeroDays.length > 0 ? "Attention" : "Warning" },
-                    { type: "TextBlock", text: `Concentrix Endpoint Security · ${today}`, size: "Small", isSubtle: true, spacing: "None" }
+                    { type: "TextBlock", text: "Concentrix Endpoint Security · " + today, size: "Small", isSubtle: true, spacing: "None" }
                   ]
                 }
               ]
@@ -649,10 +649,10 @@ async function sendTeamsNotification(webhookUrl, advisories) {
           {
             type: "ColumnSet",
             columns: [
-              { type: "Column", width: "stretch", items: [{ type: "TextBlock", text: `**${advisories.length}**\nTotal`, wrap: true, horizontalAlignment: "Center" }] },
-              { type: "Column", width: "stretch", items: [{ type: "TextBlock", text: `**${critical.length}**\nCritical`, wrap: true, horizontalAlignment: "Center", color: "Attention" }] },
-              { type: "Column", width: "stretch", items: [{ type: "TextBlock", text: `**${high.length}**\nHigh", wrap: true, horizontalAlignment: "Center", color: "Warning" }] },
-              { type: "Column", width: "stretch", items: [{ type: "TextBlock", text: `**${zeroDays.length}**\nZero-Days`, wrap: true, horizontalAlignment: "Center", color: zeroDays.length > 0 ? "Attention" : "Default" }] },
+              { type: "Column", width: "stretch", items: [{ type: "TextBlock", text: "**" + advisories.length + "**\nTotal", wrap: true, horizontalAlignment: "Center" }] },
+              { type: "Column", width: "stretch", items: [{ type: "TextBlock", text: "**" + critical.length + "**\nCritical", wrap: true, horizontalAlignment: "Center", color: "Attention" }] },
+              { type: "Column", width: "stretch", items: [{ type: "TextBlock", text: "**" + high.length + "**\nHigh", wrap: true, horizontalAlignment: "Center", color: "Warning" }] },
+              { type: "Column", width: "stretch", items: [{ type: "TextBlock", text: "**" + zeroDays.length + "**\nZero-Days", wrap: true, horizontalAlignment: "Center", color: zeroDays.length > 0 ? "Attention" : "Default" }] },
             ]
           },
           ...(facts.length > 0 ? [{
