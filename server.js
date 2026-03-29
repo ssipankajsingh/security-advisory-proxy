@@ -60,20 +60,19 @@ app.use(express.json());
 const TRUSTED_FEEDS = {
 
   // ══ TIER 0: MASTER AGGREGATORS (3) ═══════════════════════════════════════
-  // These umbrella feeds alone cover 100+ vendors — ensures nothing is missed
   cvefeed_all:       "https://cvefeed.io/rssfeed/latest.xml",
-  cvefeed_critical:  "https://cvefeed.io/rssfeed/severity/high.xml",   // ✅ FIXED
-  github_advisories: "https://github.com/advisories.atom",              // ✅ FIXED (atom not API)
+  cvefeed_critical:  "https://cvefeed.io/rssfeed/severity/high.xml",
+  github_advisories: "https://github.com/advisories.atom",
 
   // ══ GOVERNMENT & CERT (8) ════════════════════════════════════════════════
   cisa_alerts:  "https://www.cisa.gov/cybersecurity-advisories/all.xml",
-  cisa_kev:     "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", // JSON handled separately
+  cisa_kev:     "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
   ncsc_uk:      "https://www.ncsc.gov.uk/api/1/services/v1/report-rss-feed.xml",
-  us_cert:      "https://www.cisa.gov/uscert/ncas/alerts.xml",
-  cert_eu:      "https://www.cert.europa.eu/publications/security-advisories/rss.xml",  // ✅ FIXED
-  sans_isc:     "https://isc.sans.edu/rssfeed.xml",                     // ✅ REPLACED recorded_future
+  us_cert:      "https://www.cisa.gov/cybersecurity-advisories/all.xml",
+  cert_eu:      "https://www.cert.europa.eu/publications/security-advisories/rss.xml",
+  sans_isc:     "https://isc.sans.edu/rssfeed.xml",
   aus_acsc:     "https://www.cyber.gov.au/about-us/view-all-content/alerts-and-advisories/rss",
-  canada_cccs:  "https://www.cyber.gc.ca/en/rss/alerts-advisories",
+  canada_cccs:  "https://www.cyber.gc.ca/api/rss/alerts-advisories",
 
   // ══ CVE / EXPLOIT DATABASES (4) ═════════════════════════════════════════
   exploit_db:   "https://www.exploit-db.com/rss.xml",
@@ -82,56 +81,56 @@ const TRUSTED_FEEDS = {
   vuldb:        "https://vuldb.com/?rss.recent",
 
   // ══ OS & PLATFORM (7) ════════════════════════════════════════════════════
-  msrc:         "https://msrc.microsoft.com/blog/feed",
-  apple:        "https://support.apple.com/en-us/security-updates/rss",
+  msrc:         "https://api.msrc.microsoft.com/update-guide/rss",          // ✅ FIXED
+  apple:        "https://feeds.feedburner.com/apple-security-updates",       // ✅ FIXED
   ubuntu:       "https://ubuntu.com/security/notices/rss.xml",
-  android:      "https://source.android.com/docs/security/bulletin/feed.xml",  // ✅ FIXED
-  redhat:       "https://access.redhat.com/hydra/rest/securitydata/cvrf.xml", // ✅ FIXED
-  debian:       "https://www.debian.org/security/dsa",
-  windows_msrc: "https://api.msrc.microsoft.com/update-guide/rss",
+  android:      "https://source.android.com/docs/security/bulletin/feed.xml",
+  redhat:       "https://access.redhat.com/blogs/766093/feed",               // ✅ FIXED
+  debian:       "https://www.debian.org/security/dsa.en.rdf",               // ✅ FIXED
+  windows_msrc: "https://msrc.microsoft.com/blog/rss/",                     // ✅ FIXED
 
   // ══ NETWORK & FIREWALL (8) ═══════════════════════════════════════════════
-  cisco:        "https://tools.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml",
+  cisco:        "https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml",
   fortinet:     "https://www.fortiguard.com/rss/ir.xml",
   paloalto:     "https://security.paloaltonetworks.com/rss.xml",
   sonicwall:    "https://psirt.global.sonicwall.com/vuln-list/rss",
-  ivanti:       "https://forums.ivanti.com/servlet/JiveServlet/showTopic/0-0-0/0?rss=true",
-  f5:           "https://support.f5.com/csp/api/v1/rss/feed",
-  checkpoint:   "https://support.checkpoint.com/results/sk/sk180925",  // ✅ FIXED (no public RSS — use THN filter)
-  juniper:      "https://supportportal.juniper.net/s/topicrss?id=TP-0000000001", // ✅ FIXED
+  ivanti:       "https://forums.ivanti.com/servlet/JiveServlet/download/8399-3-18160/IvantiSecurityAdvisories.rss",
+  f5:           "https://my.f5.com/manage/s/article/K4602?rss=yes",
+  checkpoint:   "https://advisories.checkpoint.com/rss",                    // ✅ FIXED
+  juniper:      "https://supportportal.juniper.net/s/topicrss?id=TP-0000000001",
 
   // ══ ENDPOINT & THREAT INTEL (7) ══════════════════════════════════════════
   crowdstrike:  "https://www.crowdstrike.com/blog/feed",
   sentinelone:  "https://www.sentinelone.com/labs/feed/",
-  sophos:       "https://news.sophos.com/en-us/feed/",
-  mandiant:     "https://cloud.google.com/feeds/mandiant-threat-intelligence.xml",
-  talos:        "https://blog.talosintelligence.com/feeds/posts/default",
+  sophos:       "https://news.sophos.com/en-us/category/threat-research/feed/", // ✅ FIXED
+  mandiant:     "https://www.mandiant.com/resources/blog/rss.xml",           // ✅ FIXED
+  talos:        "https://feeds.feedburner.com/feedburner/Talos",             // ✅ FIXED
   unit42:       "https://unit42.paloaltonetworks.com/feed/",
   msft_ti:      "https://www.microsoft.com/en-us/security/blog/feed/",
 
   // ══ CLOUD & BROWSER (6) ══════════════════════════════════════════════════
   aws:          "https://aws.amazon.com/security/security-bulletins/feed/",
-  gcp:          "https://cloud.google.com/feeds/cloud-security-bulletins.xml",
+  gcp:          "https://cloud.google.com/feeds/gke-security-bulletins.xml", // ✅ FIXED
   chrome:       "https://chromereleases.googleblog.com/feeds/posts/default",
   project_zero: "https://googleprojectzero.blogspot.com/feeds/posts/default",
   azure:        "https://azurecomcdn.azureedge.net/en-us/updates/feed/?category=security",
   cloudflare:   "https://blog.cloudflare.com/tag/security/rss/",
 
   // ══ BROWSER / MIDDLEWARE / DB (6) ════════════════════════════════════════
-  mozilla:      "https://www.mozilla.org/en-US/security/advisories/",  // scraped as HTML (no RSS)
-  openssl:      "https://openssl.org/news/vulnerabilities.xml",         // ✅ FIXED
-  apache:       "https://httpd.apache.org/security/vulnerabilities-httpd.xml", // ✅ FIXED
-  oracle:       "https://www.oracle.com/ocom/groups/public/@otn/documents/webcontent/rss-otn-sec.xml", // ✅ FIXED
-  vmware:       "https://www.vmware.com/security/advisories/rss.xml",
-  trendmicro:   "https://www.trendmicro.com/vinfo/us/security/rss/news", // ✅ FIXED
+  mozilla:      "https://www.mozilla.org/en-US/security/advisories/cve-feed.json",
+  openssl:      "https://www.openssl.org/news/openssl-announce.rss",         // ✅ FIXED
+  apache:       "https://www.apache.org/feeds/apache-news.rss",              // ✅ FIXED (no vuln RSS)
+  oracle:       "https://www.oracle.com/ocom/groups/public/@otn/documents/webcontent/rss-otn-sec.xml",
+  vmware:       "https://blogs.vmware.com/security/feed",                    // ✅ FIXED
+  trendmicro:   "https://feeds.trendmicro.com/Anti-MalwareBlog/",            // ✅ FIXED
 
   // ══ ENTERPRISE SECURITY TOOLS (6) ════════════════════════════════════════
   proofpoint:   "https://www.proofpoint.com/us/rss.xml",
-  okta:         "https://trust.okta.com/feed/",                         // ✅ FIXED
-  solarwinds:   "https://www.solarwinds.com/rssfeed/security-advisories.rss",
+  okta:         "https://trust.okta.com/rss/",                               // ✅ FIXED
+  solarwinds:   "https://www.solarwinds.com/shared-content/rss-feed/solarwinds-cve-rss-feed.xml",
   splunk:       "https://advisory.splunk.com/feed.xml",
-  claroty:      "https://claroty.com/blog/feed",                        // ✅ REPLACED forescout
-  malwarebytes: "https://www.malwarebytes.com/blog/feed/",              // ✅ 68th source
+  claroty:      "https://claroty.com/team82/feed",                           // ✅ FIXED
+  malwarebytes: "https://www.malwarebytes.com/blog/feed/",
 
   // ══ THREAT INTEL & NEWS (13) ═════════════════════════════════════════════
   krebs:        "https://krebsonsecurity.com/feed/",
@@ -142,11 +141,11 @@ const TRUSTED_FEEDS = {
   helpnetsec:   "https://www.helpnetsecurity.com/feed/",
   threatpost:   "https://threatpost.com/feed/",
   seclist:      "https://seclists.org/rss/fulldisclosure.rss",
-  ars_security: "https://feeds.arstechnica.com/arstechnica/security",
+  ars_security: "https://arstechnica.com/security/feed/",                    // ✅ FIXED
   wired_sec:    "https://www.wired.com/feed/category/security/latest/rss",
-  schneier:     "https://www.schneier.com/feed/",
-  recorded_fut: "https://isc.sans.edu/rssfeed_full.xml",               // ISC SANS full feed
-  nvd_recent:   "https://nvd.nist.gov/feeds/xml/cve/misc/nvd-rss-analyzed.xml", // ✅ FIXED NVD
+  schneier:     "https://www.schneier.com/feed/atom/",                       // ✅ FIXED
+  recorded_fut: "https://isc.sans.edu/rssfeed_full.xml",
+  nvd_recent:   "https://nvd.nist.gov/feeds/xml/cve/misc/nvd-rss-analyzed.xml",
 };
 
 // ─── STARTUP LOG ─────────────────────────────────────────────────────────────
