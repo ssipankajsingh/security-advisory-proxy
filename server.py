@@ -263,30 +263,99 @@ def fetch_rss(key: str, url: str) -> list:
         if key in cache:
             return cache[key]
 
-    try:
-        # feedparser is the star — handles malformed XML, Atom, RSS 1/2, redirects
-        feed = feedparser.parse(
-            url,
-            agent="SecurityAdvisoryBot/1.0",
-            request_headers={"Accept": "application/rss+xml, application/atom+xml, */*"},
-        )
+    # Special handling for Mozilla JSON feed
+    if key == "mozilla":
+        return fetch_mozilla_json()
 
-        if feed.bozo and not feed.entries:
-            # bozo=True means malformed feed — but feedparser still tries to parse
-            # Only fail if we got zero entries AND there's a real error
-            log.warning(f"[{key}] Bozo feed: {feed.bozo_exception}")
+    try:
+        # First try: feedparser with pre-fetched content via requests
+        # This lets us set proper headers and handle redirects better
+        resp = requests.get(
+            url,
+            timeout=15,
+            headers={
+                "User-Agent": "SecurityAdvisoryBot/1.0 (Enterprise Security Monitor)",
+                "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
+            },
+            allow_redirects=True,
+        )
+        resp.raise_for_status()
+
+        # Feed feedparser the raw content — it handles malformed XML better this way
+        feed = feedparser.parse(resp.content)
 
         entries = feed.entries or []
         items = [normalise_entry(e, key) for e in entries[:50]]
 
+        if feed.bozo and not items:
+            log.warning(f"[{key}] Bozo feed (0 items): {feed.bozo_exception}")
+        elif items:
+            log.info(f"[{key}] ✅ {len(items)} items")
+        else:
+            log.info(f"[{key}] ✅ 0 items")
+
         with cache_lock:
             cache[key] = items
-
-        log.info(f"[{key}] ✅ {len(items)} items")
         return items
 
+    except requests.exceptions.SSLError:
+        # SSL error — try without verification as last resort
+        try:
+            resp = requests.get(url, timeout=15, verify=False,
+                                headers={"User-Agent": "SecurityAdvisoryBot/1.0"})
+            feed = feedparser.parse(resp.content)
+            items = [normalise_entry(e, key) for e in (feed.entries or [])[:50]]
+            log.warning(f"[{key}] SSL bypass — {len(items)} items")
+            with cache_lock:
+                cache[key] = items
+            return items
+        except Exception as e2:
+            log.error(f"[{key}] SSL fallback failed: {e2}")
+            return []
     except Exception as e:
         log.error(f"[{key}] Failed: {e}")
+        return []
+
+
+def fetch_mozilla_json() -> list:
+    """Mozilla has a JSON feed instead of RSS."""
+    with cache_lock:
+        if "mozilla" in cache:
+            return cache["mozilla"]
+    try:
+        resp = requests.get(
+            "https://www.mozilla.org/en-US/security/advisories/cve-feed.json",
+            timeout=15,
+            headers={"User-Agent": "SecurityAdvisoryBot/1.0"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        items = []
+        for entry in (data if isinstance(data, list) else data.get("advisories", []))[:50]:
+            title = entry.get("title") or entry.get("id") or ""
+            link  = entry.get("url") or entry.get("link") or "https://www.mozilla.org/security/advisories/"
+            desc  = entry.get("description") or entry.get("impact") or ""
+            combined = f"{title} {desc}"
+            items.append({
+                "id":        link,
+                "title":     title[:200],
+                "summary":   desc[:500],
+                "link":      link,
+                "published": entry.get("announced") or datetime.now(timezone.utc).isoformat(),
+                "severity":  parse_severity(combined),
+                "cvss":      parse_cvss(combined),
+                "cve":       extract_cve(combined),
+                "zeroDay":   is_zero_day(combined),
+                "source":    "mozilla",
+                "vendor":    "Mozilla",
+                "url":       link,
+            })
+        with cache_lock:
+            cache["mozilla"] = items
+        log.info(f"[mozilla] ✅ {len(items)} items (JSON)")
+        return items
+    except Exception as e:
+        log.error(f"[mozilla] JSON fetch failed: {e}")
         return []
 
 def fetch_cisa_kev() -> list:
