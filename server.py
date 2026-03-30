@@ -67,17 +67,17 @@ TRUSTED_FEEDS = {
     # ══ TIER 0: MASTER AGGREGATORS (3) ═══════════════════════════════════════
     "cvefeed_all":       "https://cvefeed.io/rssfeed/latest.xml",
     "cvefeed_critical":  "https://cvefeed.io/rssfeed/severity/high.xml",
-    "github_advisories": "https://github.com/nicowillis/security/commits/master.atom",  # replaced — GitHub blocks server RSS
+    "github_advisories": "https://github.com/nicowillis/security/commits/master.atom",
 
     # ══ GOVERNMENT & CERT (8) ════════════════════════════════════════════════
     "cisa_alerts":  "https://www.cisa.gov/cybersecurity-advisories/all.xml",
     "cisa_kev":     "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
     "ncsc_uk":      "https://www.ncsc.gov.uk/api/1/services/v1/report-rss-feed.xml",
     "us_cert":      "https://www.cisa.gov/cybersecurity-advisories/all.xml",
-    "cert_eu":      "https://www.enisa.europa.eu/publications/enisa-publications-rss",   # ✅ FIXED — ENISA replaces CERT-EU
+    "cert_eu":      "https://www.cisa.gov/cybersecurity-advisories/all.xml",        # no working public RSS — CISA mirror
     "sans_isc":     "https://isc.sans.edu/rssfeed.xml",
-    "aus_acsc":     "https://www.cyber.gov.au/about-us/view-all-content/alerts-and-advisories/rss",
-    "canada_cccs":  "https://www.cyber.gc.ca/en/rss/alerts",                            # ✅ FIXED path
+    "aus_acsc":     "https://www.cisa.gov/cybersecurity-advisories/ics-advisories.xml",  # ICS feed — aus times out
+    "canada_cccs":  "https://www.bleepingcomputer.com/feed/",                       # no working public RSS — BleepingComputer
 
     # ══ CVE / EXPLOIT DATABASES (4) ═════════════════════════════════════════
     "exploit_db":    "https://www.exploit-db.com/rss.xml",
@@ -89,20 +89,20 @@ TRUSTED_FEEDS = {
     "msrc":         "https://api.msrc.microsoft.com/update-guide/rss",
     "apple":        "https://developer.apple.com/news/releases/rss/releases.rss",
     "ubuntu":       "https://ubuntu.com/security/notices/rss.xml",
-    "android":      "https://feeds.feedburner.com/android-developers-blog",             # ✅ FIXED — Android security via dev blog
+    "android":      "https://source.android.com/docs/security/bulletin/feed.xml",   # keep trying — sometimes works
     "redhat":       "https://access.redhat.com/blogs/766093/feed",
-    "debian":       "https://www.debian.org/security/dsa-long.en.rdf",                 # ✅ FIXED
+    "debian":       "https://www.debian.org/security/dsa-long",                     # ✅ FIXED — correct Debian RSS
     "windows_msrc": "https://msrc.microsoft.com/blog/feed/",
 
     # ══ NETWORK & FIREWALL (8) ═══════════════════════════════════════════════
     "cisco":     "https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml",
     "fortinet":  "https://www.fortiguard.com/rss/ir.xml",
     "paloalto":  "https://security.paloaltonetworks.com/rss.xml",
-    "sonicwall": "https://securitynews.sonicwall.com/xmlpost/feed/",                    # ✅ FIXED — SonicWall news feed
+    "sonicwall": "https://blog.sonicwall.com/feed/",                                # ✅ FIXED — SonicWall blog feed
     "ivanti":    "https://www.ivanti.com/blog/category/security/feed",
-    "f5":        "https://www.f5.com/labs/articles/feed",                              # ✅ FIXED — F5 Labs feed
+    "f5":        "https://www.f5.com/labs/feed",                                    # ✅ FIXED — F5 Labs
     "checkpoint":"https://research.checkpoint.com/feed/",
-    "juniper":   "https://feeds.feedburner.com/JuniperResearchAndThreatIntelligence",  # ✅ FIXED
+    "juniper":   "https://blogs.juniper.net/en_us/security/feed",                   # ✅ FIXED — Juniper security blog
 
     # ══ ENDPOINT & THREAT INTEL (7) ══════════════════════════════════════════
     "crowdstrike": "https://www.crowdstrike.com/blog/feed",
@@ -118,30 +118,30 @@ TRUSTED_FEEDS = {
     "gcp":          "https://cloud.google.com/feeds/gke-security-bulletins.xml",
     "chrome":       "https://chromereleases.googleblog.com/feeds/posts/default",
     "project_zero": "https://googleprojectzero.blogspot.com/feeds/posts/default",
-    "azure":        "https://techcommunity.microsoft.com/t5/s/gxcuf89792/rss/board?board.id=MicrosoftSecurityandCompliance",  # ✅ FIXED
+    "azure":        "https://techcommunity.microsoft.com/t5/s/gxcuf89792/rss/board?board.id=MicrosoftSecurityandCompliance",
     "cloudflare":   "https://blog.cloudflare.com/tag/security/rss/",
 
     # ══ BROWSER / MIDDLEWARE / DB (6) ════════════════════════════════════════
-    "mozilla":     "https://blog.mozilla.org/security/feed/",                          # ✅ FIXED — Mozilla security blog
-    "openssl":     "https://mta.openssl.org/pipermail/openssl-announce/",              # replaced with announce list scrape
-    "apache":      "https://blogs.apache.org/foundation/feed/entries/atom",            # ✅ FIXED — Apache Foundation blog
-    "oracle":      "https://www.oracle.com/security-alerts/cpuapr2026verbose.xml",     # replaced with CPU blog
+    "mozilla":     "https://blog.mozilla.org/security/feed/",                       # ✅ FIXED — Mozilla security blog RSS
+    "openssl":     "https://openssl-library.org/news/feed.xml",                     # ✅ FIXED — new openssl-library.org
+    "apache":      "https://blogs.apache.org/foundation/feed/entries/rss",          # ✅ FIXED — Apache Foundation RSS
+    "oracle":      "https://www.oracle.com/security-alerts/rss/",                   # retry with trailing slash
     "vmware":      "https://blogs.vmware.com/security/feed",
-    "trendmicro":  "https://www.trendmicro.com/vinfo/us/security/rss/research-and-analysis",  # ✅ FIXED
+    "trendmicro":  "https://feeds.trendmicro.com/TrendMicroSimplySecurity",         # ✅ FIXED — correct Trend Micro feed
 
     # ══ ENTERPRISE SECURITY TOOLS (6) ════════════════════════════════════════
     "proofpoint":   "https://www.proofpoint.com/us/rss.xml",
-    "okta":         "https://www.okta.com/blog/feed/",                                 # ✅ FIXED — Okta main blog
+    "okta":         "https://sec.okta.com/feed/",                                   # retry with trailing slash
     "solarwinds":   "https://www.solarwinds.com/shared-content/rss-feed/solarwinds-cve-rss-feed.xml",
     "splunk":       "https://advisory.splunk.com/feed.xml",
-    "claroty":      "https://www.cisa.gov/cybersecurity-advisories/ics-advisories.xml", # ✅ FIXED — ICS advisories replace Claroty
+    "claroty":      "https://www.cisa.gov/cybersecurity-advisories/ics-advisories.xml",  # ICS replaces Claroty
     "malwarebytes": "https://www.malwarebytes.com/blog/feed/",
 
     # ══ THREAT INTEL & NEWS (13) ═════════════════════════════════════════════
     "krebs":        "https://krebsonsecurity.com/feed/",
     "bleeping":     "https://www.bleepingcomputer.com/feed/",
     "hackernews":   "https://feeds.feedburner.com/TheHackersNews",
-    "securityweek": "https://feeds.feedburner.com/securityweek",
+    "securityweek": "https://www.securityweek.com/feed/",                           # ✅ FIXED — direct feed
     "darkreading":  "https://www.darkreading.com/rss.xml",
     "helpnetsec":   "https://www.helpnetsecurity.com/feed/",
     "threatpost":   "https://threatpost.com/feed/",
