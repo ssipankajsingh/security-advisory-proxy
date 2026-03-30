@@ -1,13 +1,15 @@
-# render.yaml — drop this in your repo root to auto-deploy on Render.com (free tier)
 services:
   - type: web
     name: security-advisory-proxy
-    env: node
-    plan: free
-    buildCommand: npm install
-    startCommand: node server.js
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn server:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120
     envVars:
-      - key: NODE_ENV
-        value: production
-      - key: PORT
-        value: 3001
+      - key: SENDGRID_API_KEY
+        sync: false
+      - key: ACCESS_CODE
+        sync: false
+      - key: TEAMS_WEBHOOK
+        sync: false
+      - key: DIGEST_EMAIL
+        sync: false
