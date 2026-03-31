@@ -151,6 +151,10 @@ TRUSTED_FEEDS = {
     "schneier":     "https://www.schneier.com/feed/atom/",
     "recorded_fut": "https://isc.sans.edu/rssfeed_full.xml",
     "nvd_recent":   "https://nvd.nist.gov/feeds/xml/cve/misc/nvd-rss-analyzed.xml",
+    
+    # ══ NEWS & COMMUNITY (2 new) ═════════════════════════════════════════════
+    "reddit_netsec": "https://www.reddit.com/r/netsec/.rss",
+    "packetstorm":   "https://rss.packetstormsecurity.com/files/",
 }
 
 SOURCE_COUNT = len(TRUSTED_FEEDS)
