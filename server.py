@@ -67,7 +67,7 @@ TRUSTED_FEEDS = {
     # ══ TIER 0: MASTER AGGREGATORS (3) ═══════════════════════════════════════
     "cvefeed_all":       "https://cvefeed.io/rssfeed/latest.xml",
     "cvefeed_critical":  "https://cvefeed.io/rssfeed/severity/high.xml",
-    "github_advisories": "https://github.com/nicowillis/security/commits/master.atom",
+    "github_advisories": "https://github.com/advisories.atom",
 
     # ══ GOVERNMENT & CERT (8) ════════════════════════════════════════════════
     "cisa_alerts":  "https://www.cisa.gov/cybersecurity-advisories/all.xml",
@@ -89,7 +89,7 @@ TRUSTED_FEEDS = {
     "msrc":         "https://api.msrc.microsoft.com/update-guide/rss",
     "apple":        "https://developer.apple.com/news/releases/rss/releases.rss",
     "ubuntu":       "https://ubuntu.com/security/notices/rss.xml",
-    "android":      "https://source.android.com/docs/security/bulletin/feed.xml",   # keep trying — sometimes works
+    "android":           "https://source.android.com/docs/security/bulletin/pixel/feed.xml",
     "redhat":       "https://access.redhat.com/blogs/766093/feed",
     "debian":       "https://www.debian.org/security/dsa-long",                     # ✅ FIXED — correct Debian RSS
     "windows_msrc": "https://msrc.microsoft.com/blog/feed/",
@@ -155,6 +155,21 @@ TRUSTED_FEEDS = {
     # ══ NEWS & COMMUNITY (2 new) ═════════════════════════════════════════════
     "reddit_netsec": "https://www.reddit.com/r/netsec/.rss",
     "packetstorm":   "https://rss.packetstormsecurity.com/files/",
+    
+ # ══ Other may be duplicate (2 new) ═════════════════════════════════════════════
+    # REPLACE THESE in TRUSTED_FEEDS:
+
+"github_advisories": "https://github.com/advisories.atom",
+"android":           "https://source.android.com/docs/security/bulletin/pixel/feed.xml",
+"msrc":              "https://api.msrc.microsoft.com/update-guide/rss",
+"juniper":           "https://supportportal.juniper.net/s/rss/5003l000000UkVY",
+"f5":                "https://my.f5.com/manage/s/article/K4602?rss=yes",
+"openssl":           "https://www.openssl.org/news/secadv/secadv.rss",
+"mozilla":           "https://www.mozilla.org/security/advisories/feed/",
+"oracle":            "https://www.oracle.com/security-alerts/rss/",
+"apache":            "https://www.apache.org/foundation/feed.rss",
+"trendmicro":        "https://www.trendmicro.com/en_us/research.rss",
+"vmware":            "https://blogs.vmware.com/security/feed",
 }
 
 SOURCE_COUNT = len(TRUSTED_FEEDS)
