@@ -61,6 +61,12 @@ PORT             = int(os.getenv("PORT", 3001))
 cache = TTLCache(maxsize=200, ttl=3600)
 cache_lock = threading.Lock()
 
+# ─── ACKNOWLEDGE STORE (shared across all team members) ───────────────────────
+# Persisted in memory — resets on proxy restart (Render free tier)
+# For permanent persistence, upgrade to SQLite (future roadmap)
+ack_store = {}   # { advisory_id: { "by": "Pankaj", "at": "2026-03-31T14:00:00Z", "note": "" } }
+ack_lock  = threading.Lock()
+
 # ─── TRUSTED FEED REGISTRY (68 sources) ──────────────────────────────────────
 TRUSTED_FEEDS = {
 
@@ -100,9 +106,9 @@ TRUSTED_FEEDS = {
     "paloalto":  "https://security.paloaltonetworks.com/rss.xml",
     "sonicwall": "https://blog.sonicwall.com/feed/",                                # ✅ FIXED — SonicWall blog feed
     "ivanti":    "https://www.ivanti.com/blog/category/security/feed",
-    "f5":        "https://www.f5.com/labs/feed",                                    # ✅ FIXED — F5 Labs
+    "f5":        "https://f5-labs.medium.com/feed",                                  # ✅ FIXED — F5 Labs Medium
     "checkpoint":"https://research.checkpoint.com/feed/",
-    "juniper":   "https://blogs.juniper.net/en_us/security/feed",                   # ✅ FIXED — Juniper security blog
+    "juniper":   "https://blogs.juniper.net/en_us/feed",                             # ✅ FIXED — Juniper main blog
 
     # ══ ENDPOINT & THREAT INTEL (7) ══════════════════════════════════════════
     "crowdstrike": "https://www.crowdstrike.com/blog/feed",
@@ -125,8 +131,8 @@ TRUSTED_FEEDS = {
     "mozilla":     "https://blog.mozilla.org/security/feed/",                       # ✅ FIXED — Mozilla security blog RSS
     "openssl":     "https://openssl-library.org/news/feed.xml",                     # ✅ FIXED — new openssl-library.org
     "apache":      "https://blogs.apache.org/foundation/feed/entries/rss",          # ✅ FIXED — Apache Foundation RSS
-    "oracle":      "https://www.oracle.com/security-alerts/rss/",                   # retry with trailing slash
-    "vmware":      "https://blogs.vmware.com/security/feed",
+    "oracle":      "https://www.oracle.com/security-alerts/rss/",
+    "vmware":      "https://blogs.vmware.com/security/feed/",                        # ✅ FIXED trailing slash
     "trendmicro":  "https://feeds.trendmicro.com/TrendMicroSimplySecurity",         # ✅ FIXED — correct Trend Micro feed
 
     # ══ ENTERPRISE SECURITY TOOLS (6) ════════════════════════════════════════
@@ -152,24 +158,9 @@ TRUSTED_FEEDS = {
     "recorded_fut": "https://isc.sans.edu/rssfeed_full.xml",
     "nvd_recent":   "https://nvd.nist.gov/feeds/xml/cve/misc/nvd-rss-analyzed.xml",
     
-    # ══ NEWS & COMMUNITY (2 new) ═════════════════════════════════════════════
+    # ══ NEWS & COMMUNITY (2) ═════════════════════════════════════════════════
     "reddit_netsec": "https://www.reddit.com/r/netsec/.rss",
     "packetstorm":   "https://rss.packetstormsecurity.com/files/",
-    
- # ══ Other may be duplicate (2 new) ═════════════════════════════════════════════
-    # REPLACE THESE in TRUSTED_FEEDS:
-
-"github_advisories": "https://github.com/advisories.atom",
-"android":           "https://source.android.com/docs/security/bulletin/pixel/feed.xml",
-"msrc":              "https://api.msrc.microsoft.com/update-guide/rss",
-"juniper":           "https://supportportal.juniper.net/s/rss/5003l000000UkVY",
-"f5":                "https://my.f5.com/manage/s/article/K4602?rss=yes",
-"openssl":           "https://www.openssl.org/news/secadv/secadv.rss",
-"mozilla":           "https://www.mozilla.org/security/advisories/feed/",
-"oracle":            "https://www.oracle.com/security-alerts/rss/",
-"apache":            "https://www.apache.org/foundation/feed.rss",
-"trendmicro":        "https://www.trendmicro.com/en_us/research.rss",
-"vmware":            "https://blogs.vmware.com/security/feed",
 }
 
 SOURCE_COUNT = len(TRUSTED_FEEDS)
@@ -516,7 +507,7 @@ def advisories():
         return jsonify({
             "total":      len(all_advisories),
             "generated":  datetime.now(timezone.utc).isoformat(),
-            "advisories": all_advisories[:1000],
+            "advisories": all_advisories[:2500],
         })
     except Exception as e:
         log.error(f"Error fetching advisories: {e}")
@@ -685,6 +676,45 @@ def email_digest():
     except Exception as e:
         log.error(f"[EMAIL] Error: {e}")
         return jsonify({"error": str(e)}), 500
+
+# ─── ACKNOWLEDGE ENDPOINTS ────────────────────────────────────────────────────
+
+@app.route("/ack", methods=["GET"])
+@require_auth
+def get_acks():
+    """Return all acknowledgments."""
+    with ack_lock:
+        return jsonify({"acks": ack_store})
+
+@app.route("/ack", methods=["POST"])
+@require_auth
+def set_ack():
+    """Acknowledge an advisory."""
+    data = request.get_json() or {}
+    advisory_id = data.get("id", "").strip()
+    by          = data.get("by", "Team Member").strip()[:50]
+    note        = data.get("note", "").strip()[:200]
+    if not advisory_id:
+        return jsonify({"error": "Missing advisory id"}), 400
+    with ack_lock:
+        ack_store[advisory_id] = {
+            "by": by,
+            "at": datetime.now(timezone.utc).isoformat(),
+            "note": note,
+        }
+    log.info(f"[ACK] {advisory_id} acknowledged by {by}")
+    return jsonify({"success": True, "id": advisory_id, "by": by})
+
+@app.route("/ack/<path:advisory_id>", methods=["DELETE"])
+@require_auth
+def clear_ack(advisory_id):
+    """Remove acknowledgment from an advisory."""
+    with ack_lock:
+        removed = ack_store.pop(advisory_id, None)
+    if removed:
+        log.info(f"[ACK] {advisory_id} ack cleared")
+        return jsonify({"success": True})
+    return jsonify({"error": "Not found"}), 404
 
 # ─── TEAMS WEBHOOK ────────────────────────────────────────────────────────────
 
