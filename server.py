@@ -217,6 +217,42 @@ def dedupe(advisories: list) -> list:
             result.append(a)
     return result
 
+def extract_all_cves(text: str) -> list:
+    """Extract all CVE IDs mentioned in text."""
+    return list(dict.fromkeys(re.findall(r"CVE-\d{4}-\d{4,7}", text, re.IGNORECASE)))
+
+def extract_products(entry) -> list:
+    """Extract product/affected info from feed tags or summary."""
+    products = []
+    # From feedparser tags
+    tags = getattr(entry, "tags", []) or []
+    for t in tags:
+        val = t.get("term") or t.get("label") or ""
+        if val and len(val) < 60:
+            products.append(val)
+    # From category field
+    cat = getattr(entry, "category", "")
+    if cat and cat not in products and len(cat) < 60:
+        products.append(cat)
+    return products[:8]
+
+def extract_cvss_v3(text: str):
+    """Extract CVSS v3 score preferentially."""
+    # Try CVSSv3 first
+    m = re.search(r"CVSSv?3[.\s:]*([0-9]\.[0-9])", text, re.IGNORECASE)
+    if m:
+        return float(m.group(1))
+    # Fallback to any CVSS score
+    m = re.search(r"cvss[\s:v0-9]*([0-9]\.[0-9])", text, re.IGNORECASE)
+    return float(m.group(1)) if m else None
+
+def extract_author(entry) -> str:
+    """Extract author/reporter."""
+    author = getattr(entry, "author", "") or ""
+    if not author:
+        author = getattr(entry, "author_detail", {}).get("name", "") or ""
+    return author[:80] if author else ""
+
 def normalise_entry(entry: dict, source: str) -> dict:
     """Convert a feedparser entry into a standard advisory dict."""
     # Title
@@ -227,12 +263,20 @@ def normalise_entry(entry: dict, source: str) -> dict:
             or getattr(entry, "id", "")
             or "")
 
-    # Summary — feedparser already strips most HTML
-    summary = clean_html(
+    # Summary — try multiple fields, keep longer content
+    raw_summary = (
         getattr(entry, "summary", "")
         or getattr(entry, "description", "")
-        or getattr(entry, "content", [{}])[0].get("value", "") if hasattr(entry, "content") else ""
+        or (getattr(entry, "content", [{}])[0].get("value", "") if hasattr(entry, "content") and entry.content else "")
     )
+    summary = clean_html(raw_summary)
+
+    # Full content for detail view (up to 1500 chars)
+    full_content = ""
+    if hasattr(entry, "content") and entry.content:
+        full_content = clean_html(entry.content[0].get("value", ""))[:1500]
+    if not full_content:
+        full_content = summary
 
     # Published date
     published = ""
@@ -249,21 +293,39 @@ def normalise_entry(entry: dict, source: str) -> dict:
     if not published:
         published = datetime.now(timezone.utc).isoformat()
 
-    combined = f"{title} {summary}"
+    combined = f"{title} {summary} {full_content}"
+
+    # Extract all CVEs
+    all_cves = extract_all_cves(combined)
+    primary_cve = all_cves[0] if all_cves else None
+
+    # Products from tags
+    products = extract_products(entry)
+
+    # If no products from tags, try to parse from summary
+    if not products:
+        prod_match = re.search(r"(?:product|affects?|affected products?|versions?)[:\s]+([^\n.]{3,80})", summary, re.IGNORECASE)
+        if prod_match:
+            products = [prod_match.group(1).strip()[:60]]
 
     return {
-        "id":        link or title,
-        "title":     title[:200],
-        "summary":   summary,
-        "link":      link,
-        "published": published,
-        "severity":  parse_severity(combined),
-        "cvss":      parse_cvss(combined),
-        "cve":       extract_cve(combined),
-        "zeroDay":   is_zero_day(combined),
-        "source":    source,
-        "vendor":    source,
-        "url":       link,
+        "id":          link or title,
+        "title":       title[:200],
+        "summary":     summary[:600],
+        "description": full_content,
+        "link":        link,
+        "url":         link,
+        "published":   published,
+        "severity":    parse_severity(combined),
+        "cvss":        extract_cvss_v3(combined),
+        "cve":         primary_cve,
+        "cves":        all_cves[:10],
+        "zeroDay":     is_zero_day(combined),
+        "source":      source,
+        "vendor":      source,
+        "products":    products,
+        "author":      extract_author(entry),
+        "tags":        [t.get("term","") for t in (getattr(entry,"tags",[]) or []) if t.get("term")][:6],
     }
 
 # ─── FETCH RSS (feedparser handles all malformed XML gracefully) ──────────────
