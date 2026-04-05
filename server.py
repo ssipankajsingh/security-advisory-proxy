@@ -943,6 +943,38 @@ def clear_ack(advisory_id):
         return jsonify({"success": True})
     return jsonify({"error": "Delete failed or not found"}), 404
 
+@app.route("/cache/clear", methods=["POST"])
+@require_auth
+def clear_advisory_cache():
+    """Clear all cached advisories from Supabase."""
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return jsonify({"error": "Supabase not configured"}), 503
+    try:
+        r = requests.delete(
+            f"{SUPABASE_URL}/rest/v1/advisory_cache?fetched_at=gte.2000-01-01",
+            headers=supa_headers(), timeout=10
+        )
+        log.info(f"[SUPABASE] Advisory cache cleared: {r.status_code}")
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/source-config/clear", methods=["POST"])
+@require_auth
+def clear_source_config():
+    """Clear shared source config from Supabase — resets to defaults."""
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return jsonify({"error": "Supabase not configured"}), 503
+    try:
+        r = requests.delete(
+            f"{SUPABASE_URL}/rest/v1/source_config?updated_at=gte.2000-01-01",
+            headers=supa_headers(), timeout=10
+        )
+        log.info(f"[SUPABASE] Source config cleared: {r.status_code}")
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+        
 # ─── TEAMS WEBHOOK ────────────────────────────────────────────────────────────
 
 def send_teams_card(webhook_url: str, advisories: list):
