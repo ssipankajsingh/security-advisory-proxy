@@ -51,21 +51,91 @@ ALLOWED_ORIGINS = [
 CORS(app, origins=ALLOWED_ORIGINS)
 
 # ─── ENV VARS ─────────────────────────────────────────────────────────────────
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
-ACCESS_CODE      = os.getenv("ACCESS_CODE", "")
-TEAMS_WEBHOOK    = os.getenv("TEAMS_WEBHOOK", "")
-DIGEST_EMAIL     = os.getenv("DIGEST_EMAIL", "")
-PORT             = int(os.getenv("PORT", 3001))
+SENDGRID_API_KEY  = os.getenv("SENDGRID_API_KEY", "")
+ACCESS_CODE       = os.getenv("ACCESS_CODE", "")
+TEAMS_WEBHOOK     = os.getenv("TEAMS_WEBHOOK", "")
+DIGEST_EMAIL      = os.getenv("DIGEST_EMAIL", "")
+PORT              = int(os.getenv("PORT", 3001))
+SUPABASE_URL      = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_KEY      = os.getenv("SUPABASE_KEY", "")
 
 # ─── CACHE (1 hour TTL) ───────────────────────────────────────────────────────
 cache = TTLCache(maxsize=200, ttl=3600)
 cache_lock = threading.Lock()
 
-# ─── ACKNOWLEDGE STORE (shared across all team members) ───────────────────────
-# Persisted in memory — resets on proxy restart (Render free tier)
-# For permanent persistence, upgrade to SQLite (future roadmap)
-ack_store = {}   # { advisory_id: { "by": "Pankaj", "at": "2026-03-31T14:00:00Z", "note": "" } }
-ack_lock  = threading.Lock()
+# ─── SUPABASE HELPERS ─────────────────────────────────────────────────────────
+def supa_headers():
+    return {
+        "apikey":        SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type":  "application/json",
+        "Prefer":        "return=representation",
+    }
+
+def supa_get_acks() -> dict:
+    """Load all acknowledgments from Supabase. Returns {} on error."""
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return {}
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/acknowledgments?select=*",
+            headers=supa_headers(), timeout=8
+        )
+        if r.status_code == 200:
+            rows = r.json()
+            return {
+                row["id"]: {
+                    "by":   row["acknowledged_by"],
+                    "at":   row["acknowledged_at"],
+                    "note": row.get("note", ""),
+                }
+                for row in rows
+            }
+        log.warning(f"[SUPABASE] GET acks failed: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        log.error(f"[SUPABASE] get_acks error: {e}")
+    return {}
+
+def supa_set_ack(advisory_id: str, by: str, note: str = "") -> bool:
+    """Upsert an acknowledgment into Supabase."""
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return False
+    try:
+        payload = {
+            "id":                advisory_id,
+            "acknowledged_by":   by,
+            "acknowledged_at":   datetime.now(timezone.utc).isoformat(),
+            "note":              note,
+        }
+        headers = {**supa_headers(), "Prefer": "resolution=merge-duplicates,return=representation"}
+        r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/acknowledgments",
+            headers=headers, json=payload, timeout=8
+        )
+        if r.status_code in (200, 201):
+            log.info(f"[SUPABASE] Ack saved: {advisory_id} by {by}")
+            return True
+        log.warning(f"[SUPABASE] SET ack failed: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        log.error(f"[SUPABASE] set_ack error: {e}")
+    return False
+
+def supa_delete_ack(advisory_id: str) -> bool:
+    """Delete an acknowledgment from Supabase."""
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return False
+    try:
+        r = requests.delete(
+            f"{SUPABASE_URL}/rest/v1/acknowledgments?id=eq.{requests.utils.quote(advisory_id)}",
+            headers=supa_headers(), timeout=8
+        )
+        if r.status_code in (200, 204):
+            log.info(f"[SUPABASE] Ack deleted: {advisory_id}")
+            return True
+        log.warning(f"[SUPABASE] DELETE ack failed: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        log.error(f"[SUPABASE] delete_ack error: {e}")
+    return False
 
 # ─── TRUSTED FEED REGISTRY (68 sources) ──────────────────────────────────────
 TRUSTED_FEEDS = {
@@ -167,10 +237,11 @@ SOURCE_COUNT = len(TRUSTED_FEEDS)
 
 # ─── STARTUP LOG ──────────────────────────────────────────────────────────────
 log.info(f"🛡️  Security Advisory Proxy (Python) v1 starting on port {PORT}")
-log.info(f"   Sources : {SOURCE_COUNT} configured")
-log.info(f"   Email   : {'✅ SendGrid configured' if SENDGRID_API_KEY else '⚠️  No SendGrid key'}")
-log.info(f"   Auth    : {'✅ Access code configured' if ACCESS_CODE else '⚠️  No access code set'}")
-log.info(f"   Teams   : {'✅ Webhook configured' if TEAMS_WEBHOOK else '⚠️  No Teams webhook'}")
+log.info(f"   Sources   : {SOURCE_COUNT} configured")
+log.info(f"   Email     : {'✅ SendGrid configured' if SENDGRID_API_KEY else '⚠️  No SendGrid key'}")
+log.info(f"   Auth      : {'✅ Access code configured' if ACCESS_CODE else '⚠️  No access code set'}")
+log.info(f"   Teams     : {'✅ Webhook configured' if TEAMS_WEBHOOK else '⚠️  No Teams webhook'}")
+log.info(f"   Supabase  : {'✅ Persistent ack storage configured' if SUPABASE_URL else '⚠️  No Supabase — acks in memory only'}")
 
 # ─── HELPERS ──────────────────────────────────────────────────────────────────
 
@@ -744,39 +815,33 @@ def email_digest():
 @app.route("/ack", methods=["GET"])
 @require_auth
 def get_acks():
-    """Return all acknowledgments."""
-    with ack_lock:
-        return jsonify({"acks": ack_store})
+    """Return all acknowledgments from Supabase."""
+    acks = supa_get_acks()
+    return jsonify({"acks": acks, "count": len(acks), "persistent": bool(SUPABASE_URL)})
 
 @app.route("/ack", methods=["POST"])
 @require_auth
 def set_ack():
-    """Acknowledge an advisory."""
-    data = request.get_json() or {}
+    """Acknowledge an advisory — saved to Supabase."""
+    data        = request.get_json() or {}
     advisory_id = data.get("id", "").strip()
     by          = data.get("by", "Team Member").strip()[:50]
     note        = data.get("note", "").strip()[:200]
     if not advisory_id:
         return jsonify({"error": "Missing advisory id"}), 400
-    with ack_lock:
-        ack_store[advisory_id] = {
-            "by": by,
-            "at": datetime.now(timezone.utc).isoformat(),
-            "note": note,
-        }
-    log.info(f"[ACK] {advisory_id} acknowledged by {by}")
-    return jsonify({"success": True, "id": advisory_id, "by": by})
+    ok = supa_set_ack(advisory_id, by, note)
+    at = datetime.now(timezone.utc).isoformat()
+    log.info(f"[ACK] {advisory_id} acknowledged by {by} — Supabase: {ok}")
+    return jsonify({"success": True, "id": advisory_id, "by": by, "at": at, "persisted": ok})
 
 @app.route("/ack/<path:advisory_id>", methods=["DELETE"])
 @require_auth
 def clear_ack(advisory_id):
-    """Remove acknowledgment from an advisory."""
-    with ack_lock:
-        removed = ack_store.pop(advisory_id, None)
-    if removed:
-        log.info(f"[ACK] {advisory_id} ack cleared")
+    """Remove acknowledgment from Supabase."""
+    ok = supa_delete_ack(advisory_id)
+    if ok:
         return jsonify({"success": True})
-    return jsonify({"error": "Not found"}), 404
+    return jsonify({"error": "Delete failed or not found"}), 404
 
 # ─── TEAMS WEBHOOK ────────────────────────────────────────────────────────────
 
