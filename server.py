@@ -699,7 +699,7 @@ def advisories():
     try:
         force = request.args.get("force", "false").lower() == "true"
         # Try loading from Supabase cache first (unless forced refresh)
-        if not force and SUPABASE_URL:
+        if not force and SUPABASE_URL and request.args.get("cache") == "true":
             cached = supa_load_advisory_cache()
             if len(cached) > 50:
                 log.info(f"[ADVISORIES] Serving {len(cached)} items from Supabase cache")
