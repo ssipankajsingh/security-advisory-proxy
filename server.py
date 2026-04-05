@@ -137,6 +137,67 @@ def supa_delete_ack(advisory_id: str) -> bool:
         log.error(f"[SUPABASE] delete_ack error: {e}")
     return False
 
+def supa_save_advisory_cache(advisories: list) -> bool:
+    """Save fetched advisories to Supabase cache (upsert)."""
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return False
+    try:
+        rows = [{"id": a["id"][:500], "data": a, "fetched_at": datetime.now(timezone.utc).isoformat()} for a in advisories[:2500] if a.get("id")]
+        headers = {**supa_headers(), "Prefer": "resolution=merge-duplicates"}
+        # Batch in chunks of 200 to avoid request size limits
+        for i in range(0, len(rows), 200):
+            r = requests.post(f"{SUPABASE_URL}/rest/v1/advisory_cache", headers=headers, json=rows[i:i+200], timeout=15)
+            if r.status_code not in (200, 201):
+                log.warning(f"[SUPABASE] Cache save batch {i} failed: {r.status_code}")
+        log.info(f"[SUPABASE] Advisory cache saved: {len(rows)} items")
+        return True
+    except Exception as e:
+        log.error(f"[SUPABASE] save_advisory_cache error: {e}")
+        return False
+
+def supa_load_advisory_cache() -> list:
+    """Load cached advisories from Supabase."""
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return []
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/advisory_cache?select=data&order=fetched_at.desc&limit=2500",
+            headers=supa_headers(), timeout=10
+        )
+        if r.status_code == 200:
+            rows = r.json()
+            advisories = [row["data"] for row in rows if row.get("data")]
+            log.info(f"[SUPABASE] Advisory cache loaded: {len(advisories)} items")
+            return advisories
+    except Exception as e:
+        log.error(f"[SUPABASE] load_advisory_cache error: {e}")
+    return []
+
+def supa_get_source_config() -> dict:
+    """Load shared source enabled/disabled config."""
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return {}
+    try:
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/source_config?select=*", headers=supa_headers(), timeout=8)
+        if r.status_code == 200:
+            return {row["id"]: row["enabled"] for row in r.json()}
+    except Exception as e:
+        log.error(f"[SUPABASE] get_source_config error: {e}")
+    return {}
+
+def supa_set_source_config(source_id: str, enabled: bool, updated_by: str) -> bool:
+    """Upsert a source enabled/disabled state."""
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return False
+    try:
+        headers = {**supa_headers(), "Prefer": "resolution=merge-duplicates,return=representation"}
+        payload = {"id": source_id, "enabled": enabled, "updated_by": updated_by, "updated_at": datetime.now(timezone.utc).isoformat()}
+        r = requests.post(f"{SUPABASE_URL}/rest/v1/source_config", headers=headers, json=payload, timeout=8)
+        return r.status_code in (200, 201)
+    except Exception as e:
+        log.error(f"[SUPABASE] set_source_config error: {e}")
+        return False
+
 # ─── TRUSTED FEED REGISTRY (68 sources) ──────────────────────────────────────
 TRUSTED_FEEDS = {
 
@@ -636,11 +697,28 @@ def sources():
 @require_auth
 def advisories():
     try:
+        force = request.args.get("force", "false").lower() == "true"
+        # Try loading from Supabase cache first (unless forced refresh)
+        if not force and SUPABASE_URL:
+            cached = supa_load_advisory_cache()
+            if len(cached) > 50:
+                log.info(f"[ADVISORIES] Serving {len(cached)} items from Supabase cache")
+                return jsonify({
+                    "total":      len(cached),
+                    "generated":  datetime.now(timezone.utc).isoformat(),
+                    "advisories": cached[:2500],
+                    "source":     "cache",
+                })
+        # Cache miss or force refresh — fetch live
         all_advisories = fetch_all_advisories()
+        # Save to Supabase cache in background
+        if SUPABASE_URL and all_advisories:
+            threading.Thread(target=supa_save_advisory_cache, args=(all_advisories,), daemon=True).start()
         return jsonify({
             "total":      len(all_advisories),
             "generated":  datetime.now(timezone.utc).isoformat(),
             "advisories": all_advisories[:2500],
+            "source":     "live",
         })
     except Exception as e:
         log.error(f"Error fetching advisories: {e}")
@@ -652,6 +730,28 @@ def advisories_critical():
     all_advisories = fetch_all_advisories()
     critical = [a for a in all_advisories if a.get("severity") == "Critical" or a.get("zeroDay")]
     return jsonify({"total": len(critical), "advisories": critical})
+
+# ─── SOURCE CONFIG ENDPOINTS ──────────────────────────────────────────────────
+
+@app.route("/source-config", methods=["GET"])
+@require_auth
+def get_source_config():
+    """Return shared source enabled/disabled config."""
+    config = supa_get_source_config()
+    return jsonify({"config": config, "count": len(config)})
+
+@app.route("/source-config", methods=["POST"])
+@require_auth
+def set_source_config():
+    """Update a source's enabled state — shared across all team members."""
+    data       = request.get_json() or {}
+    source_id  = data.get("id", "").strip()
+    enabled    = data.get("enabled", True)
+    updated_by = data.get("by", "Team Member").strip()[:50]
+    if not source_id:
+        return jsonify({"error": "Missing source id"}), 400
+    ok = supa_set_source_config(source_id, enabled, updated_by)
+    return jsonify({"success": ok, "id": source_id, "enabled": enabled})
 
 # ─── EMAIL DIGEST ─────────────────────────────────────────────────────────────
 
