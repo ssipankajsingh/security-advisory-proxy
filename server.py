@@ -205,6 +205,13 @@ TRUSTED_FEEDS = {
     "cvefeed_all":       "https://cvefeed.io/rssfeed/latest.xml",
     "cvefeed_critical":  "https://cvefeed.io/rssfeed/severity/high.xml",
     "github_advisories": "https://github.com/advisories.atom",
+    "cvedaily":       "https://cvedaily.com/feed.xml",
+    "cvedaily":       "https://cvedaily.com/feed.xml",
+    "cvefeed_rss":    "https://cvefeed.io/rssfeed",
+    "zeroday_upcoming":  "https://www.zerodayinitiative.com/rss/upcoming",
+    "zeroday_published": "https://www.zerodayinitiative.com/rss/published",
+    "zeroday_bloc": "https://www.zerodayinitiative.com/blog/?format=rss",
+    "cso_online":   "https://www.csoonline.com/feed",
 
     # ══ GOVERNMENT & CERT (8) ════════════════════════════════════════════════
     "cisa_alerts":  "https://www.cisa.gov/cybersecurity-advisories/all.xml",
@@ -214,7 +221,9 @@ TRUSTED_FEEDS = {
     "cert_eu":      "https://www.cisa.gov/cybersecurity-advisories/all.xml",        # no working public RSS — CISA mirror
     "sans_isc":     "https://isc.sans.edu/rssfeed.xml",
     "aus_acsc":     "https://www.cisa.gov/cybersecurity-advisories/ics-advisories.xml",  # ICS feed — aus times out
-    "canada_cccs":  "https://www.bleepingcomputer.com/feed/",                       # no working public RSS — BleepingComputer
+    "canada_cccs":  "https://www.bleepingcomputer.com/feed",                       # no working public RSS — BleepingComputer
+    "europe_cert":  "https://cert.europa.eu/publications/security-advisories-rss",
+    "ncsc_ukrss":   "https://www.ncsc.gov.uk/api/1/services/v1/all-rss-feed.xml",
 
     # ══ CVE / EXPLOIT DATABASES (4) ═════════════════════════════════════════
     "exploit_db":    "https://www.exploit-db.com/rss.xml",
