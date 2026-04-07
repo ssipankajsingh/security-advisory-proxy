@@ -250,6 +250,41 @@ TRUSTED_FEEDS = {
     "checkpoint":"https://research.checkpoint.com/feed/",
     "juniper":   "https://blogs.juniper.net/en_us/feed",                             # ✅ FIXED — Juniper main blog
 
+        # ══ more feeds (9) ════
+   
+  "vuldb":                     "https://vuldb.com/?rss.recent",
+  "cvefeed_all":               "https://cvefeed.io/rssfeed/",
+  "cvefeed_high_critical":     "https://cvefeed.io/rssfeed/high.xml",
+  "cvedaily_all":              "https://cvedaily.com/feed.xml",
+  "cvedaily_new":              "https://cvedaily.com/feed-new.xml",
+  "cvedaily_critical":         "https://cvedaily.com/feed-critical.xml",
+  "cisa_all_advisories":       "https://www.cisa.gov/cybersecurity-advisories/rss.xml",
+  "cisa_ics":                  "https://www.cisa.gov/ics/advisories/rss.xml",
+  "certeu_advisories":         "https://cert.europa.eu/publications/security-advisories-rss",
+  "certeu_threat_intel":       "https://cert.europa.eu/publications/threat-intelligence-rss",
+  "microsoft_msrc":            "https://api.msrc.microsoft.com/update-guide/rss",
+  "apple_security":            "https://support.apple.com/en-in/rss/securityupdates.rss",
+  "google_android":            "https://source.android.com/security/bulletin/rss.xml",
+  "google_chrome":             "https://chromereleases.googleblog.com/feeds/posts/default",
+  "cisco_psirt":               "https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml",
+  "paloalto_psirt":            "https://securityadvisories.paloaltonetworks.com/rss.xml",
+  "fortinet_psirt":            "https://www.fortiguard.com/rss/ir.xml",
+  "juniper_psirt":             "https://kb.juniper.net/JSA/rss",
+  "f5_security":               "https://support.f5.com/rss/security-advisories.xml",
+  "vmware_security":           "https://www.vmware.com/security/advisories.xml",
+  "redhat_security":           "https://access.redhat.com/security/data/rss",
+  "ubuntu_security":           "https://ubuntu.com/security/notices/rss.xml",
+  "docker_security":           "https://docs.docker.com/security/rss.xml",
+  "crowdstrike_advisories":    "https://www.crowdstrike.com/security-advisories/feed/",
+  "trellix_security":          "https://www.trellix.com/en-us/rss/security-advisories.xml",
+  "sophos_security":           "https://www.sophos.com/en-us/rss/security-advisories",
+  "trendmicro_security":       "https://success.trendmicro.com/rss",
+  "veeam_security":            "https://www.veeam.com/rss/security-advisories.xml",
+  "ivanti_security":           "https://forums.ivanti.com/s/rss/security-advisories",
+  "citrix_security":           "https://www.citrix.com/blogs/security/rss.xml",
+  "splunk_security":           "https://www.splunk.com/en_us/rss/security-advisories.xml",
+  "cert_global_master":        "https://raw.githubusercontent.com/pulsedive/certrss/master/feeds.csv"
+
     # ══ ENDPOINT & THREAT INTEL (7) ══════════════════════════════════════════
     "crowdstrike": "https://www.crowdstrike.com/blog/feed",
     "sentinelone": "https://www.sentinelone.com/labs/feed/",
