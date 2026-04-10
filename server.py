@@ -1,29 +1,15 @@
 """
-Security Advisory RSS Proxy Server — Python v1
+Security Advisory RSS Proxy Server — Python v2
 ================================================
-Replaces Node.js server.js with Python + Flask + feedparser.
-
-Key advantages over Node.js version:
-- feedparser handles malformed XML gracefully (no more "Unexpected close tag" errors)
-- Cleaner, more readable code
-- Better library ecosystem for future AI/ML features
-- Same endpoints, same auth, same email/Teams support
-
-Requirements: see requirements.txt
-Runs on: Render.com (free tier)
+All pending fixes applied — April 2026
 """
 
-import os
-import re
-import json
-import time
-import logging
-import threading
-from datetime import datetime, timezone
+import os, re, json, time, logging, threading
+from datetime import datetime, timezone, timedelta
 from functools import wraps
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import feedparser
-import requests
+import feedparser, requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from cachetools import TTLCache
@@ -32,469 +18,353 @@ from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
 
 # ─── LOGGING ──────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 log = logging.getLogger(__name__)
 
-# ─── APP SETUP ────────────────────────────────────────────────────────────────
+# ─── APP ──────────────────────────────────────────────────────────────────────
 app = Flask(__name__)
-
-ALLOWED_ORIGINS = [
+CORS(app, origins=[
     "https://ssipankajsingh.github.io",
-    "http://localhost:3000",
-    "http://localhost:5500",
-    "http://127.0.0.1:5500",
-]
-CORS(app, origins=ALLOWED_ORIGINS)
+    "http://localhost:3000","http://localhost:5500","http://127.0.0.1:5500",
+])
 
-# ─── ENV VARS ─────────────────────────────────────────────────────────────────
-SENDGRID_API_KEY  = os.getenv("SENDGRID_API_KEY", "")
-ACCESS_CODE       = os.getenv("ACCESS_CODE", "")
-TEAMS_WEBHOOK     = os.getenv("TEAMS_WEBHOOK", "")
-DIGEST_EMAIL      = os.getenv("DIGEST_EMAIL", "")
-PORT              = int(os.getenv("PORT", 3001))
-SUPABASE_URL      = os.getenv("SUPABASE_URL", "").rstrip("/")
-SUPABASE_KEY      = os.getenv("SUPABASE_KEY", "")
+# ─── ENV ──────────────────────────────────────────────────────────────────────
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY","")
+ACCESS_CODE      = os.getenv("ACCESS_CODE","")
+TEAMS_WEBHOOK    = os.getenv("TEAMS_WEBHOOK","")
+DIGEST_EMAIL     = os.getenv("DIGEST_EMAIL","")
+PORT             = int(os.getenv("PORT",3001))
+SUPABASE_URL     = os.getenv("SUPABASE_URL","").rstrip("/")
+SUPABASE_KEY     = os.getenv("SUPABASE_KEY","")
 
-# ─── CACHE (1 hour TTL) ───────────────────────────────────────────────────────
-cache = TTLCache(maxsize=200, ttl=3600)
+# ─── CACHE ────────────────────────────────────────────────────────────────────
+cache      = TTLCache(maxsize=200, ttl=3600)
 cache_lock = threading.Lock()
 
-# ─── SUPABASE HELPERS ─────────────────────────────────────────────────────────
-def supa_headers():
-    return {
-        "apikey":        SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type":  "application/json",
-        "Prefer":        "return=representation",
-    }
+# ─── SUPABASE ─────────────────────────────────────────────────────────────────
+def supa_headers(prefer="return=representation"):
+    return {"apikey":SUPABASE_KEY,"Authorization":f"Bearer {SUPABASE_KEY}",
+            "Content-Type":"application/json","Prefer":prefer}
 
 def supa_get_acks() -> dict:
-    """Load all acknowledgments from Supabase. Returns {} on error."""
-    if not (SUPABASE_URL and SUPABASE_KEY):
-        return {}
+    if not (SUPABASE_URL and SUPABASE_KEY): return {}
     try:
-        r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/acknowledgments?select=*",
-            headers=supa_headers(), timeout=8
-        )
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/acknowledgments?select=*", headers=supa_headers(), timeout=8)
         if r.status_code == 200:
-            rows = r.json()
-            return {
-                row["id"]: {
-                    "by":   row["acknowledged_by"],
-                    "at":   row["acknowledged_at"],
-                    "note": row.get("note", ""),
-                }
-                for row in rows
-            }
-        log.warning(f"[SUPABASE] GET acks failed: {r.status_code} {r.text[:200]}")
-    except Exception as e:
-        log.error(f"[SUPABASE] get_acks error: {e}")
+            return {row["id"]:{"by":row["acknowledged_by"],"at":row["acknowledged_at"],"note":row.get("note","")} for row in r.json()}
+    except Exception as e: log.error(f"[SUPABASE] get_acks: {e}")
     return {}
 
-def supa_set_ack(advisory_id: str, by: str, note: str = "") -> bool:
-    """Upsert an acknowledgment into Supabase."""
-    if not (SUPABASE_URL and SUPABASE_KEY):
-        return False
+def supa_set_ack(advisory_id:str, by:str, note:str="") -> bool:
+    if not (SUPABASE_URL and SUPABASE_KEY): return False
     try:
-        payload = {
-            "id":                advisory_id,
-            "acknowledged_by":   by,
-            "acknowledged_at":   datetime.now(timezone.utc).isoformat(),
-            "note":              note,
-        }
-        headers = {**supa_headers(), "Prefer": "resolution=merge-duplicates,return=representation"}
-        r = requests.post(
-            f"{SUPABASE_URL}/rest/v1/acknowledgments",
-            headers=headers, json=payload, timeout=8
-        )
-        if r.status_code in (200, 201):
-            log.info(f"[SUPABASE] Ack saved: {advisory_id} by {by}")
-            return True
-        log.warning(f"[SUPABASE] SET ack failed: {r.status_code} {r.text[:200]}")
-    except Exception as e:
-        log.error(f"[SUPABASE] set_ack error: {e}")
-    return False
+        h = {**supa_headers(),"Prefer":"resolution=merge-duplicates,return=representation"}
+        payload = {"id":advisory_id,"acknowledged_by":by,"acknowledged_at":datetime.now(timezone.utc).isoformat(),"note":note}
+        r = requests.post(f"{SUPABASE_URL}/rest/v1/acknowledgments", headers=h, json=payload, timeout=8)
+        return r.status_code in (200,201)
+    except Exception as e: log.error(f"[SUPABASE] set_ack: {e}"); return False
 
-def supa_delete_ack(advisory_id: str) -> bool:
-    """Delete an acknowledgment from Supabase."""
-    if not (SUPABASE_URL and SUPABASE_KEY):
-        return False
+def supa_delete_ack(advisory_id:str, by:str) -> bool:
+    """Only allow delete if acknowledged_by matches requester."""
+    if not (SUPABASE_URL and SUPABASE_KEY): return False
     try:
-        r = requests.delete(
-            f"{SUPABASE_URL}/rest/v1/acknowledgments?id=eq.{requests.utils.quote(advisory_id)}",
-            headers=supa_headers(), timeout=8
-        )
-        if r.status_code in (200, 204):
-            log.info(f"[SUPABASE] Ack deleted: {advisory_id}")
-            return True
-        log.warning(f"[SUPABASE] DELETE ack failed: {r.status_code} {r.text[:200]}")
-    except Exception as e:
-        log.error(f"[SUPABASE] delete_ack error: {e}")
-    return False
-
-def supa_save_advisory_cache(advisories: list) -> bool:
-    """Save fetched advisories to Supabase cache (upsert)."""
-    if not (SUPABASE_URL and SUPABASE_KEY):
-        return False
-    try:
-        rows = [{"id": a["id"][:500], "data": a, "fetched_at": datetime.now(timezone.utc).isoformat()} for a in advisories[:2500] if a.get("id")]
-        headers = {**supa_headers(), "Prefer": "resolution=merge-duplicates"}
-        # Batch in chunks of 200 to avoid request size limits
-        for i in range(0, len(rows), 200):
-            r = requests.post(f"{SUPABASE_URL}/rest/v1/advisory_cache", headers=headers, json=rows[i:i+200], timeout=15)
-            if r.status_code not in (200, 201):
-                log.warning(f"[SUPABASE] Cache save batch {i} failed: {r.status_code}")
-        log.info(f"[SUPABASE] Advisory cache saved: {len(rows)} items")
-        return True
-    except Exception as e:
-        log.error(f"[SUPABASE] save_advisory_cache error: {e}")
-        return False
-
-def supa_load_advisory_cache() -> list:
-    """Load cached advisories from Supabase."""
-    if not (SUPABASE_URL and SUPABASE_KEY):
-        return []
-    try:
+        # Verify ownership first
         r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/advisory_cache?select=data&order=fetched_at.desc&limit=1000", headers={**supa_headers(), "Range-Unit": "items", "Range": "0-999"},
-            timeout=10
-        )
+            f"{SUPABASE_URL}/rest/v1/acknowledgments?id=eq.{requests.utils.quote(advisory_id)}&select=acknowledged_by",
+            headers=supa_headers(), timeout=8)
         if r.status_code == 200:
             rows = r.json()
-            advisories = [row["data"] for row in rows if row.get("data")]
-            log.info(f"[SUPABASE] Advisory cache loaded: {len(advisories)} items")
-            return advisories
-    except Exception as e:
-        log.exception("[SUPABASE] load_advisory_cache error")
+            if rows and rows[0].get("acknowledged_by","") != by:
+                log.warning(f"[SUPABASE] Undo blocked: {advisory_id} owned by {rows[0].get('acknowledged_by')} not {by}")
+                return False
+        r = requests.delete(
+            f"{SUPABASE_URL}/rest/v1/acknowledgments?id=eq.{requests.utils.quote(advisory_id)}",
+            headers=supa_headers(), timeout=8)
+        return r.status_code in (200,204)
+    except Exception as e: log.error(f"[SUPABASE] delete_ack: {e}"); return False
+
+def supa_save_advisory_cache(advisories:list) -> bool:
+    if not (SUPABASE_URL and SUPABASE_KEY): return False
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        rows = [{"id":a["id"][:500],"data":{**a,"isNew":False},"fetched_at":now} for a in advisories[:2500] if a.get("id")]
+        h = {**supa_headers(),"Prefer":"resolution=merge-duplicates"}
+        for i in range(0, len(rows), 200):
+            r = requests.post(f"{SUPABASE_URL}/rest/v1/advisory_cache", headers=h, json=rows[i:i+200], timeout=15)
+            if r.status_code not in (200,201): log.warning(f"[SUPABASE] Cache batch {i} failed: {r.status_code}")
+        # Purge items older than 90 days
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+        requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_cache?fetched_at=lt.{cutoff}", headers=supa_headers(), timeout=10)
+        log.info(f"[SUPABASE] Cache saved: {len(rows)} items")
+        return True
+    except Exception as e: log.error(f"[SUPABASE] save_cache: {e}"); return False
+
+def supa_load_advisory_cache() -> list:
+    if not (SUPABASE_URL and SUPABASE_KEY): return []
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/advisory_cache?select=data&order=fetched_at.desc&limit=1000",
+            headers={**supa_headers(),"Range-Unit":"items","Range":"0-999"}, timeout=10)
+        if r.status_code == 200:
+            items = [row["data"] for row in r.json() if row.get("data")]
+            log.info(f"[SUPABASE] Cache loaded: {len(items)} items")
+            return items
+    except Exception as e: log.error(f"[SUPABASE] load_cache: {e}")
     return []
 
 def supa_get_source_config() -> dict:
-    """Load shared source enabled/disabled config."""
-    if not (SUPABASE_URL and SUPABASE_KEY):
-        return {}
+    if not (SUPABASE_URL and SUPABASE_KEY): return {}
     try:
         r = requests.get(f"{SUPABASE_URL}/rest/v1/source_config?select=*", headers=supa_headers(), timeout=8)
-        if r.status_code == 200:
-            return {row["id"]: row["enabled"] for row in r.json()}
-    except Exception as e:
-        log.error(f"[SUPABASE] get_source_config error: {e}")
+        if r.status_code == 200: return {row["id"]:row["enabled"] for row in r.json()}
+    except Exception as e: log.error(f"[SUPABASE] get_source_config: {e}")
     return {}
 
-def supa_set_source_config(source_id: str, enabled: bool, updated_by: str) -> bool:
-    """Upsert a source enabled/disabled state."""
-    if not (SUPABASE_URL and SUPABASE_KEY):
-        return False
+def supa_set_source_config(source_id:str, enabled:bool, updated_by:str) -> bool:
+    if not (SUPABASE_URL and SUPABASE_KEY): return False
     try:
-        headers = {**supa_headers(), "Prefer": "resolution=merge-duplicates,return=representation"}
-        payload = {"id": source_id, "enabled": enabled, "updated_by": updated_by, "updated_at": datetime.now(timezone.utc).isoformat()}
-        r = requests.post(f"{SUPABASE_URL}/rest/v1/source_config", headers=headers, json=payload, timeout=8)
-        return r.status_code in (200, 201)
-    except Exception as e:
-        log.error(f"[SUPABASE] set_source_config error: {e}")
-        return False
+        h = {**supa_headers(),"Prefer":"resolution=merge-duplicates,return=representation"}
+        r = requests.post(f"{SUPABASE_URL}/rest/v1/source_config", headers=h,
+            json={"id":source_id,"enabled":enabled,"updated_by":updated_by,"updated_at":datetime.now(timezone.utc).isoformat()}, timeout=8)
+        return r.status_code in (200,201)
+    except Exception as e: log.error(f"[SUPABASE] set_source_config: {e}"); return False
 
-# ─── TRUSTED FEED REGISTRY (68 sources) ──────────────────────────────────────
+# Purge acks older than 1 year
+def supa_purge_old_acks():
+    if not (SUPABASE_URL and SUPABASE_KEY): return
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=365)).isoformat()
+        requests.delete(f"{SUPABASE_URL}/rest/v1/acknowledgments?acknowledged_at=lt.{cutoff}", headers=supa_headers(), timeout=10)
+        log.info("[SUPABASE] Old acks purged")
+    except Exception as e: log.error(f"[SUPABASE] purge_acks: {e}")
+
+# ─── TRUSTED FEED REGISTRY (86 sources) ──────────────────────────────────────
 TRUSTED_FEEDS = {
 
-    # ══ TIER 0: MASTER AGGREGATORS (3) ═══════════════════════════════════════
-    "cvefeed_all":       "https://cvefeed.io/rssfeed/latest.xml",
-    "cvefeed_critical":  "https://cvefeed.io/rssfeed/severity/high.xml",
-    "github_advisories": "https://github.com/advisories.atom",
-    "cvedaily":       "https://cvedaily.com/feed.xml",
-    "cvedaily":       "https://cvedaily.com/feed.xml",
-    "cvefeed_rss":    "https://cvefeed.io/rssfeed",
-    "zeroday_upcoming":  "https://www.zerodayinitiative.com/rss/upcoming",
-    "zeroday_published": "https://www.zerodayinitiative.com/rss/published",
-    "zeroday_bloc": "https://www.zerodayinitiative.com/blog/?format=rss",
-    "cso_online":   "https://www.csoonline.com/feed",
+    # ══ TIER 0: MASTER AGGREGATORS ═══════════════════════════════════════════
+    "cvefeed_all":           "https://cvefeed.io/rssfeed/",
+    "cvefeed_high_critical": "https://cvefeed.io/rssfeed/high.xml",
+    "github_advisories":     "https://github.com/advisories.atom",
+    "cvedaily_all":          "https://cvedaily.com/feed.xml",
+    "cvedaily_new":          "https://cvedaily.com/feed-new.xml",
+    "cvedaily_critical":     "https://cvedaily.com/feed-critical.xml",
 
-    # ══ GOVERNMENT & CERT (8) ════════════════════════════════════════════════
-    "cisa_alerts":  "https://www.cisa.gov/cybersecurity-advisories/all.xml",
-    "cisa_kev":     "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
-    "ncsc_uk":      "https://www.ncsc.gov.uk/api/1/services/v1/report-rss-feed.xml",
-    "us_cert":      "https://www.cisa.gov/cybersecurity-advisories/all.xml",
-    "cert_eu":      "https://www.cisa.gov/cybersecurity-advisories/all.xml",        # no working public RSS — CISA mirror
-    "sans_isc":     "https://isc.sans.edu/rssfeed.xml",
-    "aus_acsc":     "https://www.cisa.gov/cybersecurity-advisories/ics-advisories.xml",  # ICS feed — aus times out
-    "canada_cccs":  "https://www.bleepingcomputer.com/feed",                       # no working public RSS — BleepingComputer
-    "europe_cert":  "https://cert.europa.eu/publications/security-advisories-rss",
-    "ncsc_ukrss":   "https://www.ncsc.gov.uk/api/1/services/v1/all-rss-feed.xml",
+    # ══ GOVERNMENT & CERT ════════════════════════════════════════════════════
+    "cisa_alerts":       "https://www.cisa.gov/cybersecurity-advisories/all.xml",
+    "cisa_kev":          "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
+    "cisa_ics":          "https://www.cisa.gov/ics/advisories/rss.xml",
+    "ncsc_uk":           "https://www.ncsc.gov.uk/api/1/services/v1/report-rss-feed.xml",
+    "us_cert":           "https://www.cisa.gov/cybersecurity-advisories/all.xml",
+    "cert_eu":           "https://cert.europa.eu/publications/security-advisories-rss",
+    "certeu_threat_intel":"https://cert.europa.eu/publications/threat-intelligence-rss",
+    "cert_in":           "https://www.cert-in.org.in/RSS/Vulnerability_Notes.xml",
+    "sans_isc":          "https://isc.sans.edu/rssfeed.xml",
 
-    # ══ CVE / EXPLOIT DATABASES (4) ═════════════════════════════════════════
+    # ══ CVE / EXPLOIT DATABASES ══════════════════════════════════════════════
     "exploit_db":    "https://www.exploit-db.com/rss.xml",
     "zdi_published": "https://www.zerodayinitiative.com/rss/published/",
     "zdi_upcoming":  "https://www.zerodayinitiative.com/rss/upcoming/",
     "vuldb":         "https://vuldb.com/?rss.recent",
+    "packetstorm":   "https://rss.packetstormsecurity.com/files/",
+    "nvd_recent":    "https://nvd.nist.gov/feeds/xml/cve/misc/nvd-rss-analyzed.xml",
 
-    # ══ OS & PLATFORM (7) ════════════════════════════════════════════════════
+    # ══ OS & PLATFORM ════════════════════════════════════════════════════════
     "msrc":         "https://api.msrc.microsoft.com/update-guide/rss",
-    "apple":        "https://developer.apple.com/news/releases/rss/releases.rss",
+    "msrc_blog":    "https://msrc.microsoft.com/blog/feed/",
+    "ms_azure":     "https://techcommunity.microsoft.com/t5/s/gxcuf89792/rss/board?board.id=MicrosoftSecurityandCompliance",
+    "apple":        "https://support.apple.com/en-in/rss/securityupdates.rss",
     "ubuntu":       "https://ubuntu.com/security/notices/rss.xml",
-    "android":           "https://source.android.com/docs/security/bulletin/pixel/feed.xml",
-    "redhat":       "https://access.redhat.com/blogs/766093/feed",
-    "debian":       "https://www.debian.org/security/dsa-long",                     # ✅ FIXED — correct Debian RSS
-    "windows_msrc": "https://msrc.microsoft.com/blog/feed/",
+    "android":      "https://source.android.com/security/bulletin/rss.xml",
+    "redhat":       "https://access.redhat.com/security/data/rss",
+    "debian":       "https://www.debian.org/security/dsa-long",
+    "docker":       "https://docs.docker.com/security/rss.xml",
 
-    # ══ NETWORK & FIREWALL (8) ═══════════════════════════════════════════════
-    "cisco":     "https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml",
-    "fortinet":  "https://www.fortiguard.com/rss/ir.xml",
-    "paloalto":  "https://security.paloaltonetworks.com/rss.xml",
-    "sonicwall": "https://blog.sonicwall.com/feed/",                                # ✅ FIXED — SonicWall blog feed
-    "ivanti":    "https://www.ivanti.com/blog/category/security/feed",
-    "f5":        "https://f5-labs.medium.com/feed",                                  # ✅ FIXED — F5 Labs Medium
-    "checkpoint":"https://research.checkpoint.com/feed/",
-    "juniper":   "https://blogs.juniper.net/en_us/feed",                             # ✅ FIXED — Juniper main blog
+    # ══ NETWORK & FIREWALL ═══════════════════════════════════════════════════
+    "cisco":        "https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml",
+    "fortinet":     "https://www.fortiguard.com/rss/ir.xml",
+    "paloalto":     "https://security.paloaltonetworks.com/rss.xml",
+    "paloalto_psirt":"https://securityadvisories.paloaltonetworks.com/rss.xml",
+    "sonicwall":    "https://blog.sonicwall.com/feed/",
+    "ivanti":       "https://forums.ivanti.com/s/rss/security-advisories",
+    "f5":           "https://support.f5.com/rss/security-advisories.xml",
+    "checkpoint":   "https://research.checkpoint.com/feed/",
+    "juniper":      "https://kb.juniper.net/JSA/rss",
+    "citrix":       "https://www.citrix.com/blogs/security/rss.xml",
+    "aruba":        "https://www.arubanetworks.com/security-advisories/feed",
+    "netgear":      "https://kb.netgear.com/app/answers/detail/a_id/62001",
+    "zyxel":        "https://www.zyxel.com/global/en/support/security-advisories.shtml",
 
-        # ══ more feeds (9) ════
-   
-  "vuldb":                     "https://vuldb.com/?rss.recent",
-  "cvefeed_all":               "https://cvefeed.io/rssfeed/",
-  "cvefeed_high_critical":     "https://cvefeed.io/rssfeed/high.xml",
-  "cvedaily_all":              "https://cvedaily.com/feed.xml",
-  "cvedaily_new":              "https://cvedaily.com/feed-new.xml",
-  "cvedaily_critical":         "https://cvedaily.com/feed-critical.xml",
-  "cisa_all_advisories":       "https://www.cisa.gov/cybersecurity-advisories/rss.xml",
-  "cisa_ics":                  "https://www.cisa.gov/ics/advisories/rss.xml",
-  "certeu_advisories":         "https://cert.europa.eu/publications/security-advisories-rss",
-  "certeu_threat_intel":       "https://cert.europa.eu/publications/threat-intelligence-rss",
-  "microsoft_msrc":            "https://api.msrc.microsoft.com/update-guide/rss",
-  "apple_security":            "https://support.apple.com/en-in/rss/securityupdates.rss",
-  "google_android":            "https://source.android.com/security/bulletin/rss.xml",
-  "google_chrome":             "https://chromereleases.googleblog.com/feeds/posts/default",
-  "cisco_psirt":               "https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml",
-  "paloalto_psirt":            "https://securityadvisories.paloaltonetworks.com/rss.xml",
-  "fortinet_psirt":            "https://www.fortiguard.com/rss/ir.xml",
-  "juniper_psirt":             "https://kb.juniper.net/JSA/rss",
-  "f5_security":               "https://support.f5.com/rss/security-advisories.xml",
-  "vmware_security":           "https://www.vmware.com/security/advisories.xml",
-  "redhat_security":           "https://access.redhat.com/security/data/rss",
-  "ubuntu_security":           "https://ubuntu.com/security/notices/rss.xml",
-  "docker_security":           "https://docs.docker.com/security/rss.xml",
-  "crowdstrike_advisories":    "https://www.crowdstrike.com/security-advisories/feed/",
-  "trellix_security":          "https://www.trellix.com/en-us/rss/security-advisories.xml",
-  "sophos_security":           "https://www.sophos.com/en-us/rss/security-advisories",
-  "trendmicro_security":       "https://success.trendmicro.com/rss",
-  "veeam_security":            "https://www.veeam.com/rss/security-advisories.xml",
-  "ivanti_security":           "https://forums.ivanti.com/s/rss/security-advisories",
-  "citrix_security":           "https://www.citrix.com/blogs/security/rss.xml",
-  "splunk_security":           "https://www.splunk.com/en_us/rss/security-advisories.xml",
-  "cert_global_master":        "https://raw.githubusercontent.com/pulsedive/certrss/master/feeds.csv",
+    # ══ ENDPOINT SECURITY ════════════════════════════════════════════════════
+    "crowdstrike":            "https://www.crowdstrike.com/security-advisories/feed/",
+    "crowdstrike_blog":       "https://www.crowdstrike.com/blog/feed/",
+    "sentinelone":            "https://www.sentinelone.com/labs/feed/",
+    "sophos":                 "https://www.sophos.com/en-us/rss/security-advisories",
+    "trendmicro":             "https://success.trendmicro.com/rss",
+    "trellix":                "https://www.trellix.com/en-us/rss/security-advisories.xml",
+    "malwarebytes":           "https://www.malwarebytes.com/blog/feed/",
+    "eset":                   "https://www.welivesecurity.com/feed/",
 
-    # ══ ENDPOINT & THREAT INTEL (7) ══════════════════════════════════════════
-    "crowdstrike": "https://www.crowdstrike.com/blog/feed",
-    "sentinelone": "https://www.sentinelone.com/labs/feed/",
-    "sophos":      "https://news.sophos.com/en-us/category/threat-research/feed/",
-    "mandiant":    "https://www.mandiant.com/resources/blog/rss.xml",
-    "talos":       "https://feeds.feedburner.com/feedburner/Talos",
-    "unit42":      "https://unit42.paloaltonetworks.com/feed/",
-    "msft_ti":     "https://www.microsoft.com/en-us/security/blog/feed/",
-
-    # ══ CLOUD & BROWSER (6) ══════════════════════════════════════════════════
+    # ══ CLOUD & BROWSER ══════════════════════════════════════════════════════
     "aws":          "https://aws.amazon.com/security/security-bulletins/feed/",
     "gcp":          "https://cloud.google.com/feeds/gke-security-bulletins.xml",
     "chrome":       "https://chromereleases.googleblog.com/feeds/posts/default",
     "project_zero": "https://googleprojectzero.blogspot.com/feeds/posts/default",
-    "azure":        "https://techcommunity.microsoft.com/t5/s/gxcuf89792/rss/board?board.id=MicrosoftSecurityandCompliance",
     "cloudflare":   "https://blog.cloudflare.com/tag/security/rss/",
+    "okta":         "https://sec.okta.com/feed/",
 
-    # ══ BROWSER / MIDDLEWARE / DB (6) ════════════════════════════════════════
-    "mozilla":     "https://blog.mozilla.org/security/feed/",                       # ✅ FIXED — Mozilla security blog RSS
-    "openssl":     "https://openssl-library.org/news/feed.xml",                     # ✅ FIXED — new openssl-library.org
-    "apache":      "https://blogs.apache.org/foundation/feed/entries/rss",          # ✅ FIXED — Apache Foundation RSS
-    "oracle":      "https://www.oracle.com/security-alerts/rss/",
-    "vmware":      "https://blogs.vmware.com/security/feed/",                        # ✅ FIXED trailing slash
-    "trendmicro":  "https://feeds.trendmicro.com/TrendMicroSimplySecurity",         # ✅ FIXED — correct Trend Micro feed
-
-    # ══ ENTERPRISE SECURITY TOOLS (6) ════════════════════════════════════════
-    "proofpoint":   "https://www.proofpoint.com/us/rss.xml",
-    "okta":         "https://sec.okta.com/feed/",                                   # retry with trailing slash
-    "solarwinds":   "https://www.solarwinds.com/shared-content/rss-feed/solarwinds-cve-rss-feed.xml",
+    # ══ MIDDLEWARE / DB ═══════════════════════════════════════════════════════
+    "mozilla":      "https://blog.mozilla.org/security/feed/",
+    "openssl":      "https://openssl-library.org/news/feed.xml",
+    "apache":       "https://blogs.apache.org/foundation/feed/entries/rss",
+    "oracle":       "https://www.oracle.com/security-alerts/rss/",
+    "vmware":       "https://www.vmware.com/security/advisories.xml",
     "splunk":       "https://advisory.splunk.com/feed.xml",
-    "claroty":      "https://www.cisa.gov/cybersecurity-advisories/ics-advisories.xml",  # ICS replaces Claroty
-    "malwarebytes": "https://www.malwarebytes.com/blog/feed/",
+    "veeam":        "https://www.veeam.com/rss/security-advisories.xml",
+    "nginx":        "https://nginx.org/en/security_advisories.xml",
 
-    # ══ THREAT INTEL & NEWS (13) ═════════════════════════════════════════════
+    # ══ YOUR STACK ═══════════════════════════════════════════════════════════
+    "cortex_xdr":   "https://security.paloaltonetworks.com/rss.xml",
+    "netskope":     "https://www.netskope.com/blog/feed",
+    "proofpoint":   "https://www.proofpoint.com/us/rss.xml",
+    "solarwinds":   "https://www.solarwinds.com/shared-content/rss-feed/solarwinds-cve-rss-feed.xml",
+    "forescout":    "https://www.forescout.com/resources/feed/?type=advisory",
+
+    # ══ THREAT INTEL ══════════════════════════════════════════════════════════
+    "mandiant":     "https://www.mandiant.com/resources/blog/rss.xml",
+    "talos":        "https://feeds.feedburner.com/feedburner/Talos",
+    "unit42":       "https://unit42.paloaltonetworks.com/feed/",
+    "msft_ti":      "https://www.microsoft.com/en-us/security/blog/feed/",
+    "secureworks":  "https://www.secureworks.com/blog/rss",
+    "recorded_fut": "https://www.recordedfuture.com/category/research/feed/",
+
+    # ══ NEWS & COMMUNITY ══════════════════════════════════════════════════════
     "krebs":        "https://krebsonsecurity.com/feed/",
     "bleeping":     "https://www.bleepingcomputer.com/feed/",
     "hackernews":   "https://feeds.feedburner.com/TheHackersNews",
-    "securityweek": "https://www.securityweek.com/feed/",                           # ✅ FIXED — direct feed
+    "securityweek": "https://www.securityweek.com/feed/",
     "darkreading":  "https://www.darkreading.com/rss.xml",
     "helpnetsec":   "https://www.helpnetsecurity.com/feed/",
-    "threatpost":   "https://threatpost.com/feed/",
-    "seclist":      "https://seclists.org/rss/fulldisclosure.rss",
     "ars_security": "https://arstechnica.com/security/feed/",
     "wired_sec":    "https://www.wired.com/feed/category/security/latest/rss",
     "schneier":     "https://www.schneier.com/feed/atom/",
-    "recorded_fut": "https://isc.sans.edu/rssfeed_full.xml",
-    "nvd_recent":   "https://nvd.nist.gov/feeds/xml/cve/misc/nvd-rss-analyzed.xml",
-    
-    # ══ NEWS & COMMUNITY (2) ═════════════════════════════════════════════════
-    "reddit_netsec": "https://www.reddit.com/r/netsec/.rss",
-    "packetstorm":   "https://rss.packetstormsecurity.com/files/",
+    "reddit_netsec":"https://www.reddit.com/r/netsec/.rss",
+    "threatpost":   "https://threatpost.com/feed/",
 }
 
 SOURCE_COUNT = len(TRUSTED_FEEDS)
 
-# ─── STARTUP LOG ──────────────────────────────────────────────────────────────
-log.info(f"🛡️  Security Advisory Proxy (Python) v1 starting on port {PORT}")
-log.info(f"   Sources   : {SOURCE_COUNT} configured")
-log.info(f"   Email     : {'✅ SendGrid configured' if SENDGRID_API_KEY else '⚠️  No SendGrid key'}")
-log.info(f"   Auth      : {'✅ Access code configured' if ACCESS_CODE else '⚠️  No access code set'}")
-log.info(f"   Teams     : {'✅ Webhook configured' if TEAMS_WEBHOOK else '⚠️  No Teams webhook'}")
-log.info(f"   Supabase  : {'✅ Persistent ack storage configured' if SUPABASE_URL else '⚠️  No Supabase — acks in memory only'}")
-
-# ─── HELPERS ──────────────────────────────────────────────────────────────────
-
-SEVERITY_KEYWORDS = {
-    "Critical": ["critical", "cvss 9", "cvss 10", "remote code execution", "rce",
-                 "zero-day", "actively exploited", "unauthenticated"],
-    "High":     ["high", "cvss 7", "cvss 8", "privilege escalation",
-                 "authentication bypass", "zero day"],
-    "Medium":   ["medium", "moderate", "cvss 5", "cvss 6",
-                 "denial of service", "information disclosure"],
-    "Low":      ["low", "cvss 1", "cvss 2", "cvss 3", "cvss 4"],
+# OEM/Vendor Tier 1 — shown first in feed (direct vendor PSIRTs)
+OEM_TIER1 = {
+    "msrc","cisco","fortinet","paloalto","paloalto_psirt","juniper","f5","sonicwall",
+    "ivanti","citrix","checkpoint","vmware","crowdstrike","sophos","apple","ubuntu",
+    "redhat","android","oracle","splunk","veeam","cisa_kev","cisa_alerts","cisa_ics",
+    "ncsc_uk","cert_eu","cert_in","zdi_published","mozilla","openssl","cortex_xdr",
+    "netskope","forescout","aws","gcp","msrc_blog","trellix",
 }
 
-def parse_severity(text: str) -> str:
-    text = text.lower()
-    for severity, keywords in SEVERITY_KEYWORDS.items():
-        if any(kw in text for kw in keywords):
-            return severity
+# ─── STARTUP LOG ──────────────────────────────────────────────────────────────
+log.info(f"🛡️  Security Advisory Proxy v2 — port {PORT}")
+log.info(f"   Sources   : {SOURCE_COUNT} configured")
+log.info(f"   Email     : {'✅ SendGrid' if SENDGRID_API_KEY else '⚠️  No SendGrid'}")
+log.info(f"   Auth      : {'✅ Access code set' if ACCESS_CODE else '⚠️  No access code'}")
+log.info(f"   Teams     : {'✅ Webhook set' if TEAMS_WEBHOOK else '⚠️  No webhook'}")
+log.info(f"   Supabase  : {'✅ Persistent storage' if SUPABASE_URL else '⚠️  Memory only'}")
+
+# ─── HELPERS ──────────────────────────────────────────────────────────────────
+SEVERITY_KEYWORDS = {
+    "Critical":["critical","cvss 9","cvss 10","remote code execution","rce","zero-day","actively exploited","unauthenticated"],
+    "High":    ["high","cvss 7","cvss 8","privilege escalation","authentication bypass","zero day"],
+    "Medium":  ["medium","moderate","cvss 5","cvss 6","denial of service","information disclosure"],
+    "Low":     ["low","cvss 1","cvss 2","cvss 3","cvss 4"],
+}
+
+def parse_severity(text:str) -> str:
+    t = text.lower()
+    for sev, kws in SEVERITY_KEYWORDS.items():
+        if any(k in t for k in kws): return sev
     return "Unknown"
 
-def parse_cvss(text: str):
-    match = re.search(r"cvss[\s:v0-9]*([0-9]\.[0-9])", text, re.IGNORECASE)
-    return float(match.group(1)) if match else None
-
-def is_zero_day(text: str) -> bool:
-    return bool(re.search(r"zero.?day|0.?day|actively exploit|in the wild", text, re.IGNORECASE))
-
-def extract_cve(text: str):
-    match = re.search(r"CVE-\d{4}-\d{4,7}", text, re.IGNORECASE)
-    return match.group(0).upper() if match else None
-
-def clean_html(text: str) -> str:
-    """Strip HTML tags from text."""
-    return re.sub(r"<[^>]+>", " ", text or "").strip()[:500]
-
-def dedupe(advisories: list) -> list:
-    """Remove duplicate advisories by id."""
-    seen = set()
-    result = []
-    for a in advisories:
-        key = a.get("cve") or a.get("id", "")[:60].lower()
-        if key and key not in seen:
-            seen.add(key)
-            result.append(a)
-    return result
-
-def extract_all_cves(text: str) -> list:
-    """Extract all CVE IDs mentioned in text."""
-    return list(dict.fromkeys(re.findall(r"CVE-\d{4}-\d{4,7}", text, re.IGNORECASE)))
-
-def extract_products(entry) -> list:
-    """Extract product/affected info from feed tags or summary."""
-    products = []
-    # From feedparser tags
-    tags = getattr(entry, "tags", []) or []
-    for t in tags:
-        val = t.get("term") or t.get("label") or ""
-        if val and len(val) < 60:
-            products.append(val)
-    # From category field
-    cat = getattr(entry, "category", "")
-    if cat and cat not in products and len(cat) < 60:
-        products.append(cat)
-    return products[:8]
-
-def extract_cvss_v3(text: str):
-    """Extract CVSS v3 score preferentially."""
-    # Try CVSSv3 first
+def extract_cvss_v3(text:str):
     m = re.search(r"CVSSv?3[.\s:]*([0-9]\.[0-9])", text, re.IGNORECASE)
-    if m:
-        return float(m.group(1))
-    # Fallback to any CVSS score
+    if m: return float(m.group(1))
     m = re.search(r"cvss[\s:v0-9]*([0-9]\.[0-9])", text, re.IGNORECASE)
     return float(m.group(1)) if m else None
 
+def parse_cvss(text:str): return extract_cvss_v3(text)
+
+def is_zero_day(text:str) -> bool:
+    return bool(re.search(r"zero.?day|0.?day|actively exploit|in the wild|exploited in", text, re.IGNORECASE))
+
+def extract_cve(text:str):
+    m = re.search(r"CVE-\d{4}-\d{4,7}", text, re.IGNORECASE)
+    return m.group(0).upper() if m else None
+
+def extract_all_cves(text:str) -> list:
+    return list(dict.fromkeys(re.findall(r"CVE-\d{4}-\d{4,7}", text, re.IGNORECASE)))
+
+def clean_html(text:str) -> str:
+    return re.sub(r"<[^>]+>"," ", text or "").strip()
+
+def extract_products(entry) -> list:
+    products = []
+    for t in (getattr(entry,"tags",[]) or []):
+        v = t.get("term") or t.get("label") or ""
+        if v and len(v) < 60 and v not in products: products.append(v)
+    cat = getattr(entry,"category","")
+    if cat and cat not in products and len(cat) < 60: products.append(cat)
+    return products[:8]
+
 def extract_author(entry) -> str:
-    """Extract author/reporter."""
-    author = getattr(entry, "author", "") or ""
-    if not author:
-        author = getattr(entry, "author_detail", {}).get("name", "") or ""
-    return author[:80] if author else ""
+    a = getattr(entry,"author","") or getattr(entry,"author_detail",{}).get("name","") or ""
+    return a[:80]
 
-def normalise_entry(entry: dict, source: str) -> dict:
-    """Convert a feedparser entry into a standard advisory dict."""
-    # Title
-    title = clean_html(getattr(entry, "title", "") or "")
+def dedupe(advisories:list) -> list:
+    seen = set(); result = []
+    for a in advisories:
+        key = (a.get("cve") or a.get("id","")[:60]).lower()
+        if key and key not in seen: seen.add(key); result.append(a)
+    return result
 
-    # Link
-    link = (getattr(entry, "link", "")
-            or getattr(entry, "id", "")
-            or "")
+def fmt_ts(dt_str:str) -> str:
+    """Return ISO timestamp string."""
+    return dt_str or datetime.now(timezone.utc).isoformat()
 
-    # Summary — try multiple fields, keep longer content
-    raw_summary = (
-        getattr(entry, "summary", "")
-        or getattr(entry, "description", "")
-        or (getattr(entry, "content", [{}])[0].get("value", "") if hasattr(entry, "content") and entry.content else "")
-    )
-    summary = clean_html(raw_summary)
+def normalise_entry(entry, source:str) -> dict:
+    title   = clean_html(getattr(entry,"title","") or "")
+    link    = getattr(entry,"link","") or getattr(entry,"id","") or ""
+    raw_sum = (getattr(entry,"summary","") or getattr(entry,"description","") or
+               (getattr(entry,"content",[{}])[0].get("value","") if hasattr(entry,"content") and entry.content else ""))
+    summary = clean_html(raw_sum)[:600]
+    full    = clean_html(getattr(entry,"content",[{}])[0].get("value","") if hasattr(entry,"content") and entry.content else "")[:1500] or summary
 
-    # Full content for detail view (up to 1500 chars)
-    full_content = ""
-    if hasattr(entry, "content") and entry.content:
-        full_content = clean_html(entry.content[0].get("value", ""))[:1500]
-    if not full_content:
-        full_content = summary
-
-    # Published date
     published = ""
-    if hasattr(entry, "published_parsed") and entry.published_parsed:
-        try:
-            published = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc).isoformat()
-        except Exception:
-            published = ""
-    if not published and hasattr(entry, "updated_parsed") and entry.updated_parsed:
-        try:
-            published = datetime(*entry.updated_parsed[:6], tzinfo=timezone.utc).isoformat()
-        except Exception:
-            published = datetime.now(timezone.utc).isoformat()
-    if not published:
-        published = datetime.now(timezone.utc).isoformat()
+    for attr in ["published_parsed","updated_parsed"]:
+        val = getattr(entry, attr, None)
+        if val:
+            try: published = datetime(*val[:6], tzinfo=timezone.utc).isoformat(); break
+            except: pass
+    if not published: published = datetime.now(timezone.utc).isoformat()
 
-    combined = f"{title} {summary} {full_content}"
-
-    # Extract all CVEs
+    combined = f"{title} {summary} {full}"
     all_cves = extract_all_cves(combined)
-    primary_cve = all_cves[0] if all_cves else None
-
-    # Products from tags
     products = extract_products(entry)
-
-    # If no products from tags, try to parse from summary
     if not products:
-        prod_match = re.search(r"(?:product|affects?|affected products?|versions?)[:\s]+([^\n.]{3,80})", summary, re.IGNORECASE)
-        if prod_match:
-            products = [prod_match.group(1).strip()[:60]]
+        m = re.search(r"(?:product|affects?|affected)[:\s]+([^\n.]{3,80})", summary, re.IGNORECASE)
+        if m: products = [m.group(1).strip()[:60]]
+
+    is_oem = source in OEM_TIER1
 
     return {
         "id":          link or title,
         "title":       title[:200],
-        "summary":     summary[:600],
-        "description": full_content,
+        "summary":     summary,
+        "description": full,
         "link":        link,
         "url":         link,
         "published":   published,
         "severity":    parse_severity(combined),
         "cvss":        extract_cvss_v3(combined),
-        "cve":         primary_cve,
+        "cve":         all_cves[0] if all_cves else None,
         "cves":        all_cves[:10],
         "zeroDay":     is_zero_day(combined),
         "source":      source,
@@ -502,610 +372,333 @@ def normalise_entry(entry: dict, source: str) -> dict:
         "products":    products,
         "author":      extract_author(entry),
         "tags":        [t.get("term","") for t in (getattr(entry,"tags",[]) or []) if t.get("term")][:6],
+        "isOEM":       is_oem,
     }
 
-# ─── FETCH RSS (feedparser handles all malformed XML gracefully) ──────────────
-
-def fetch_rss(key: str, url: str) -> list:
+# ─── FETCH ────────────────────────────────────────────────────────────────────
+def fetch_rss(key:str, url:str) -> list:
     with cache_lock:
-        if key in cache:
-            return cache[key]
-
-    # Special handling for Mozilla JSON feed
-    if key == "mozilla":
-        return fetch_mozilla_json()
-
+        if key in cache: return cache[key]
+    if key == "mozilla": return fetch_mozilla_json()
     try:
-        # First try: feedparser with pre-fetched content via requests
-        # This lets us set proper headers and handle redirects better
-        resp = requests.get(
-            url,
-            timeout=15,
-            headers={
-                "User-Agent": "SecurityAdvisoryBot/1.0 (Enterprise Security Monitor)",
-                "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*",
-            },
-            allow_redirects=True,
-        )
+        resp = requests.get(url, timeout=15, headers={
+            "User-Agent":"SecurityAdvisoryBot/2.0 (Enterprise Security Monitor)",
+            "Accept":"application/rss+xml,application/atom+xml,application/xml,text/xml,*/*",
+        }, allow_redirects=True)
         resp.raise_for_status()
-
-        # Feed feedparser the raw content — it handles malformed XML better this way
-        feed = feedparser.parse(resp.content)
-
-        entries = feed.entries or []
-        items = [normalise_entry(e, key) for e in entries[:50]]
-
-        if feed.bozo and not items:
-            log.warning(f"[{key}] Bozo feed (0 items): {feed.bozo_exception}")
-        elif items:
-            log.info(f"[{key}] ✅ {len(items)} items")
-        else:
-            log.info(f"[{key}] ✅ 0 items")
-
-        with cache_lock:
-            cache[key] = items
+        feed  = feedparser.parse(resp.content)
+        items = [normalise_entry(e, key) for e in (feed.entries or [])[:50]]
+        if feed.bozo and not items: log.warning(f"[{key}] Bozo: {feed.bozo_exception}")
+        elif items: log.info(f"[{key}] ✅ {len(items)} items")
+        with cache_lock: cache[key] = items
         return items
-
     except requests.exceptions.SSLError:
-        # SSL error — try without verification as last resort
         try:
-            resp = requests.get(url, timeout=15, verify=False,
-                                headers={"User-Agent": "SecurityAdvisoryBot/1.0"})
-            feed = feedparser.parse(resp.content)
+            resp  = requests.get(url, timeout=15, verify=False, headers={"User-Agent":"SecurityAdvisoryBot/2.0"})
+            feed  = feedparser.parse(resp.content)
             items = [normalise_entry(e, key) for e in (feed.entries or [])[:50]]
             log.warning(f"[{key}] SSL bypass — {len(items)} items")
-            with cache_lock:
-                cache[key] = items
+            with cache_lock: cache[key] = items
             return items
-        except Exception as e2:
-            log.error(f"[{key}] SSL fallback failed: {e2}")
-            return []
-    except Exception as e:
-        log.error(f"[{key}] Failed: {e}")
-        return []
-
+        except Exception as e2: log.error(f"[{key}] SSL fallback: {e2}"); return []
+    except Exception as e: log.error(f"[{key}] Failed: {e}"); return []
 
 def fetch_mozilla_json() -> list:
-    """Mozilla has a JSON feed instead of RSS."""
     with cache_lock:
-        if "mozilla" in cache:
-            return cache["mozilla"]
+        if "mozilla" in cache: return cache["mozilla"]
     try:
-        resp = requests.get(
-            "https://www.mozilla.org/en-US/security/advisories/cve-feed.json",
-            timeout=15,
-            headers={"User-Agent": "SecurityAdvisoryBot/1.0"},
-        )
+        resp = requests.get("https://www.mozilla.org/en-US/security/advisories/cve-feed.json",
+                            timeout=15, headers={"User-Agent":"SecurityAdvisoryBot/2.0"})
         resp.raise_for_status()
         data = resp.json()
         items = []
-        for entry in (data if isinstance(data, list) else data.get("advisories", []))[:50]:
+        for entry in (data if isinstance(data,list) else data.get("advisories",[]))[:50]:
             title = entry.get("title") or entry.get("id") or ""
             link  = entry.get("url") or entry.get("link") or "https://www.mozilla.org/security/advisories/"
             desc  = entry.get("description") or entry.get("impact") or ""
             combined = f"{title} {desc}"
-            items.append({
-                "id":        link,
-                "title":     title[:200],
-                "summary":   desc[:500],
-                "link":      link,
-                "published": entry.get("announced") or datetime.now(timezone.utc).isoformat(),
-                "severity":  parse_severity(combined),
-                "cvss":      parse_cvss(combined),
-                "cve":       extract_cve(combined),
-                "zeroDay":   is_zero_day(combined),
-                "source":    "mozilla",
-                "vendor":    "Mozilla",
-                "url":       link,
-            })
-        with cache_lock:
-            cache["mozilla"] = items
+            items.append({"id":link,"title":title[:200],"summary":desc[:600],"description":desc,"link":link,
+                "published":entry.get("announced") or datetime.now(timezone.utc).isoformat(),
+                "severity":parse_severity(combined),"cvss":extract_cvss_v3(combined),
+                "cve":extract_cve(combined),"cves":extract_all_cves(combined),
+                "zeroDay":is_zero_day(combined),"source":"mozilla","vendor":"Mozilla","url":link,
+                "products":[],"author":"","tags":[],"isOEM":True})
+        with cache_lock: cache["mozilla"] = items
         log.info(f"[mozilla] ✅ {len(items)} items (JSON)")
         return items
-    except Exception as e:
-        log.error(f"[mozilla] JSON fetch failed: {e}")
-        return []
+    except Exception as e: log.error(f"[mozilla] JSON failed: {e}"); return []
 
 def fetch_cisa_kev() -> list:
-    """Fetch CISA Known Exploited Vulnerabilities JSON catalog."""
     with cache_lock:
-        if "cisa_kev" in cache:
-            return cache["cisa_kev"]
+        if "cisa_kev" in cache: return cache["cisa_kev"]
     try:
-        resp = requests.get(
-            "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
-            timeout=15,
-            headers={"User-Agent": "SecurityAdvisoryBot/1.0"},
-        )
+        resp = requests.get("https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
+                            timeout=15, headers={"User-Agent":"SecurityAdvisoryBot/2.0"})
         resp.raise_for_status()
-        vulns = resp.json().get("vulnerabilities", [])[:30]
         items = []
-        for v in vulns:
-            cve_id = v.get("cveID", "")
-            items.append({
-                "id":        cve_id,
-                "title":     f"{cve_id} — {v.get('vulnerabilityName', '')}",
-                "summary":   f"{v.get('shortDescription', '')} | Vendor: {v.get('vendorProject', '')} | Product: {v.get('product', '')} | Required Action: {v.get('requiredAction', '')}",
-                "link":      f"https://nvd.nist.gov/vuln/detail/{cve_id}",
-                "published": v.get("dateAdded", datetime.now(timezone.utc).isoformat()),
-                "severity":  "Critical",
-                "cvss":      None,
-                "cve":       cve_id,
-                "zeroDay":   True,
-                "source":    "CISA KEV",
-                "vendor":    "CISA",
-                "url":       f"https://nvd.nist.gov/vuln/detail/{cve_id}",
-            })
-        with cache_lock:
-            cache["cisa_kev"] = items
+        for v in resp.json().get("vulnerabilities",[])[:50]:
+            cve_id = v.get("cveID","")
+            title  = f"{cve_id} — {v.get('vulnerabilityName','')}"
+            summary= (f"{v.get('shortDescription','')} | Vendor: {v.get('vendorProject','')} | "
+                      f"Product: {v.get('product','')} | Required Action: {v.get('requiredAction','')}")
+            items.append({"id":cve_id,"title":title,"summary":summary,"description":summary,
+                "link":f"https://nvd.nist.gov/vuln/detail/{cve_id}","url":f"https://nvd.nist.gov/vuln/detail/{cve_id}",
+                "published":v.get("dateAdded",datetime.now(timezone.utc).isoformat()),
+                "severity":"Critical","cvss":None,"cve":cve_id,"cves":[cve_id],"zeroDay":True,
+                "source":"CISA KEV","vendor":"CISA","products":[v.get("product","")],"author":"","tags":["KEV"],"isOEM":True})
+        with cache_lock: cache["cisa_kev"] = items
         log.info(f"[cisa_kev] ✅ {len(items)} items")
         return items
-    except Exception as e:
-        log.error(f"[cisa_kev] Failed: {e}")
-        return []
+    except Exception as e: log.error(f"[cisa_kev] Failed: {e}"); return []
 
 def fetch_all_advisories() -> list:
-    """Fetch from all sources concurrently using threads."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    results = []
-    futures = {}
-
-    with ThreadPoolExecutor(max_workers=20) as executor:
+    results = []; futures = {}
+    with ThreadPoolExecutor(max_workers=25) as executor:
         for key, url in TRUSTED_FEEDS.items():
-            if key == "cisa_kev":
-                futures[executor.submit(fetch_cisa_kev)] = key
-            else:
-                futures[executor.submit(fetch_rss, key, url)] = key
-
+            if key == "cisa_kev": futures[executor.submit(fetch_cisa_kev)] = key
+            else: futures[executor.submit(fetch_rss, key, url)] = key
         for future in as_completed(futures):
-            try:
-                results.extend(future.result())
-            except Exception as e:
-                log.error(f"Thread error: {e}")
+            try: results.extend(future.result())
+            except Exception as e: log.error(f"Thread error: {e}")
 
-    # Dedupe and sort: Critical first, then by date
     results = dedupe(results)
-    severity_order = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Unknown": 4}
+    sev_order = {"Critical":0,"High":1,"Medium":2,"Low":3,"Unknown":4}
     results.sort(key=lambda a: (
-        severity_order.get(a.get("severity", "Unknown"), 4),
-        not a.get("zeroDay", False),
-        -(datetime.fromisoformat(a["published"].replace("Z", "+00:00")).timestamp()
-          if a.get("published") else 0),
+        0 if a.get("isOEM") else 1,                           # OEM first
+        sev_order.get(a.get("severity","Unknown"),4),
+        not a.get("zeroDay",False),
+        -(datetime.fromisoformat(a["published"].replace("Z","+00:00")).timestamp() if a.get("published") else 0),
     ))
     return results
 
 # ─── AUTH ─────────────────────────────────────────────────────────────────────
-
 def require_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         token = (request.headers.get("x-access-code")
                  or (request.json or {}).get("accessCode")
                  or (request.json or {}).get("code"))
-        if not ACCESS_CODE or token == ACCESS_CODE:
-            return f(*args, **kwargs)
-        return jsonify({"error": "Unauthorized"}), 401
+        if not ACCESS_CODE or token == ACCESS_CODE: return f(*args, **kwargs)
+        return jsonify({"error":"Unauthorized"}), 401
     return decorated
 
 # ─── ROUTES ───────────────────────────────────────────────────────────────────
+START_TIME = time.time()
 
 @app.route("/")
 def root():
-    return jsonify({
-        "name":      "Security Advisory Proxy",
-        "version":   "Python v1",
-        "status":    "running",
-        "sources":   SOURCE_COUNT,
-        "uptime":    int(time.time() - START_TIME),
-        "endpoints": [
-            "GET  /",
-            "GET  /health",
-            "POST /auth/verify",
-            "GET  /sources",
-            "GET  /advisories",
-            "GET  /advisories/critical",
-            "POST /email-digest",
-            "POST /teams-notify",
-        ],
-    })
+    return jsonify({"name":"Security Advisory Proxy","version":"v2","status":"running",
+        "sources":SOURCE_COUNT,"uptime":int(time.time()-START_TIME)})
 
 @app.route("/health")
 def health():
-    return jsonify({
-        "status":  "ok",
-        "version": "Python v1",
-        "sources": SOURCE_COUNT,
-        "uptime":  int(time.time() - START_TIME),
-    })
+    return jsonify({"status":"ok","version":"v2","sources":SOURCE_COUNT,"uptime":int(time.time()-START_TIME)})
 
 @app.route("/auth/verify", methods=["POST"])
 def auth_verify():
     data = request.get_json() or {}
     submitted = (data.get("code") or data.get("accessCode") or "").strip()
     valid = not ACCESS_CODE or submitted == ACCESS_CODE.strip()
-    log.info(f"[AUTH] Login attempt: {'✅ SUCCESS' if valid else '❌ FAILED'} — {datetime.now().isoformat()}")
-    if valid:
-        return jsonify({"valid": True, "success": True})
-    return jsonify({"valid": False, "success": False, "error": "Invalid access code"}), 401
+    log.info(f"[AUTH] {'✅ SUCCESS' if valid else '❌ FAILED'}")
+    if valid: return jsonify({"valid":True,"success":True})
+    return jsonify({"valid":False,"success":False,"error":"Invalid access code"}), 401
 
 @app.route("/sources")
 @require_auth
 def sources():
-    return jsonify({
-        "total":   SOURCE_COUNT,
-        "sources": list(TRUSTED_FEEDS.keys()),
-    })
+    return jsonify({"total":SOURCE_COUNT,"sources":list(TRUSTED_FEEDS.keys()),"oem_tier1":list(OEM_TIER1)})
 
 @app.route("/advisories")
 @require_auth
 def advisories():
     try:
-        force = request.args.get("force", "false").lower() == "true"
-        # Try loading from Supabase cache first (unless forced refresh)
-        if not force and SUPABASE_URL and request.args.get("cache") == "true":
+        force = request.args.get("force","false").lower() == "true"
+        # Only serve from cache on auto-refresh (not manual/first load)
+        if not force and SUPABASE_URL:
             cached = supa_load_advisory_cache()
             if len(cached) > 50:
-                log.info(f"[ADVISORIES] Serving {len(cached)} items from Supabase cache")
-                return jsonify({
-                    "total":      len(cached),
-                    "generated":  datetime.now(timezone.utc).isoformat(),
-                    "advisories": cached[:2500],
-                    "source":     "cache",
-                })
-        # Cache miss or force refresh — fetch live
-        all_advisories = fetch_all_advisories()
-        # Save to Supabase cache in background
-        if SUPABASE_URL and all_advisories:
-            threading.Thread(target=supa_save_advisory_cache, args=(all_advisories,), daemon=True).start()
-        return jsonify({
-            "total":      len(all_advisories),
-            "generated":  datetime.now(timezone.utc).isoformat(),
-            "advisories": all_advisories[:2500],
-            "source":     "live",
-        })
+                log.info(f"[ADVISORIES] Cache hit: {len(cached)} items")
+                return jsonify({"total":len(cached),"generated":datetime.now(timezone.utc).isoformat(),
+                    "advisories":cached[:2500],"source":"cache"})
+        # Live fetch
+        all_adv = fetch_all_advisories()
+        if SUPABASE_URL and all_adv:
+            threading.Thread(target=supa_save_advisory_cache, args=(all_adv,), daemon=True).start()
+        return jsonify({"total":len(all_adv),"generated":datetime.now(timezone.utc).isoformat(),
+            "advisories":all_adv[:2500],"source":"live"})
     except Exception as e:
-        log.error(f"Error fetching advisories: {e}")
-        return jsonify({"error": "Failed to fetch advisories"}), 500
+        log.error(f"[ADVISORIES] {e}")
+        return jsonify({"error":"Failed to fetch advisories"}), 500
 
 @app.route("/advisories/critical")
 @require_auth
 def advisories_critical():
-    all_advisories = fetch_all_advisories()
-    critical = [a for a in all_advisories if a.get("severity") == "Critical" or a.get("zeroDay")]
-    return jsonify({"total": len(critical), "advisories": critical})
+    all_adv = fetch_all_advisories()
+    crit = [a for a in all_adv if a.get("severity")=="Critical" or a.get("zeroDay")]
+    return jsonify({"total":len(crit),"advisories":crit})
 
-# ─── SOURCE CONFIG ENDPOINTS ──────────────────────────────────────────────────
-
-@app.route("/source-config", methods=["GET"])
-@require_auth
-def get_source_config():
-    """Return shared source enabled/disabled config."""
-    config = supa_get_source_config()
-    return jsonify({"config": config, "count": len(config)})
-
-@app.route("/source-config", methods=["POST"])
-@require_auth
-def set_source_config():
-    """Update a source's enabled state — shared across all team members."""
-    data       = request.get_json() or {}
-    source_id  = data.get("id", "").strip()
-    enabled    = data.get("enabled", True)
-    updated_by = data.get("by", "Team Member").strip()[:50]
-    if not source_id:
-        return jsonify({"error": "Missing source id"}), 400
-    ok = supa_set_source_config(source_id, enabled, updated_by)
-    return jsonify({"success": ok, "id": source_id, "enabled": enabled})
-
-# ─── EMAIL DIGEST ─────────────────────────────────────────────────────────────
-
-def build_email_html(advisories: list) -> str:
-    critical  = [a for a in advisories if a.get("severity") == "Critical"]
-    high      = [a for a in advisories if a.get("severity") == "High"]
-    zero_days = [a for a in advisories if a.get("zeroDay")]
-    today     = datetime.now().strftime("%A, %d %B %Y")
-
-    # Rule-based recommendations
-    recs = []
-    if zero_days:
-        recs.append(f"🚨 {len(zero_days)} zero-day exploit(s) detected — patch immediately")
-    if critical:
-        recs.append(f"⚠️ {len(critical)} critical CVEs require action within 24 hours")
-    if any("microsoft" in a.get("source","").lower() or "msrc" in a.get("source","").lower() for a in advisories):
-        recs.append("🪟 Microsoft patches available — schedule via WSUS/Intune")
-    if any("fortinet" in a.get("title","").lower() for a in advisories):
-        recs.append("🔒 Fortinet advisory detected — verify FortiGate/FortiOS patch status")
-    if any("cisco" in a.get("title","").lower() for a in advisories):
-        recs.append("🌐 Cisco advisory detected — review IOS XE and ASA exposure")
-    if any("chrome" in a.get("title","").lower() for a in advisories):
-        recs.append("🌐 Chrome update available — push to managed endpoints")
-    if not recs:
-        recs.append("✅ No critical action items today — continue routine monitoring")
-
-    def render_rows(items, max_items=10):
-        rows = ""
-        for a in items[:max_items]:
-            sev_color = "#7f1d1d" if a.get("severity") == "Critical" else "#78350f" if a.get("severity") == "High" else "#1e3a5f"
-            cve_html = f'<code style="color:#60a5fa;font-size:11px;margin-left:6px;">{a["cve"]}</code>' if a.get("cve") else ""
-            rows += f"""<tr>
-                <td style="padding:6px 10px;border-bottom:1px solid #2a2a2a;">
-                    <span style="background:{sev_color};color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;">{a.get("severity","?")}</span>
-                    {cve_html}
-                </td>
-                <td style="padding:6px 10px;border-bottom:1px solid #2a2a2a;color:#e5e7eb;font-size:12px;">{a.get("title","")[:90]}</td>
-                <td style="padding:6px 10px;border-bottom:1px solid #2a2a2a;color:#9ca3af;font-size:11px;">{a.get("source","")}</td>
-            </tr>"""
-        return rows
-
-    zd_banner = f"""
-    <div style="background:#2d0a0a;border:1px solid #dc2626;border-radius:6px;padding:12px 16px;margin-bottom:16px;">
-        <p style="margin:0;font-size:13px;color:#fca5a5;">
-            🚨 <strong>{len(zero_days)} Zero-Day Exploit(s)</strong> — Active exploitation in the wild. Immediate patching required.
-        </p>
-    </div>""" if zero_days else ""
-
-    critical_table = f"""
-    <div style="background:#161616;border:1px solid #2a2a2a;border-radius:6px;margin-bottom:16px;overflow:hidden;">
-        <div style="padding:12px 16px;border-bottom:1px solid #2a2a2a;">
-            <h2 style="margin:0;font-size:13px;color:#fca5a5;text-transform:uppercase;letter-spacing:.05em;">Critical Advisories</h2>
-        </div>
-        <table style="width:100%;border-collapse:collapse;">
-            <tr style="background:#1a1a1a;">
-                <th style="padding:6px 10px;text-align:left;font-size:11px;color:#6b7280;">Severity</th>
-                <th style="padding:6px 10px;text-align:left;font-size:11px;color:#6b7280;">Title</th>
-                <th style="padding:6px 10px;text-align:left;font-size:11px;color:#6b7280;">Source</th>
-            </tr>
-            {render_rows(critical)}
-        </table>
-    </div>""" if critical else ""
-
-    high_table = f"""
-    <div style="background:#161616;border:1px solid #2a2a2a;border-radius:6px;margin-bottom:16px;overflow:hidden;">
-        <div style="padding:12px 16px;border-bottom:1px solid #2a2a2a;">
-            <h2 style="margin:0;font-size:13px;color:#fcd34d;text-transform:uppercase;letter-spacing:.05em;">High Severity</h2>
-        </div>
-        <table style="width:100%;border-collapse:collapse;">
-            <tr style="background:#1a1a1a;">
-                <th style="padding:6px 10px;text-align:left;font-size:11px;color:#6b7280;">Severity</th>
-                <th style="padding:6px 10px;text-align:left;font-size:11px;color:#6b7280;">Title</th>
-                <th style="padding:6px 10px;text-align:left;font-size:11px;color:#6b7280;">Source</th>
-            </tr>
-            {render_rows(high, 8)}
-        </table>
-    </div>""" if high else ""
-
-    recs_html = "".join(f"<li>{r}</li>" for r in recs)
-
-    return f"""<!DOCTYPE html>
-<html><head><meta charset="UTF-8"></head>
-<body style="background:#0f0f0f;font-family:Arial,sans-serif;color:#e5e7eb;margin:0;padding:0;">
-<div style="max-width:680px;margin:0 auto;padding:24px 16px;">
-    <div style="background:#161616;border:1px solid #2a2a2a;border-radius:8px;padding:20px 24px;margin-bottom:16px;">
-        <h1 style="margin:0;font-size:17px;font-weight:600;color:#fff;">🛡️ Security Advisory Daily Digest</h1>
-        <p style="margin:4px 0 0;font-size:12px;color:#9ca3af;">Concentrix Endpoint Security — {today}</p>
-    </div>
-    <div style="display:flex;gap:10px;margin-bottom:16px;">
-        <div style="flex:1;background:#161616;border:1px solid #2a2a2a;border-radius:6px;padding:12px;text-align:center;">
-            <div style="font-size:22px;font-weight:700;color:#fff;">{len(advisories)}</div>
-            <div style="font-size:11px;color:#9ca3af;">Total</div>
-        </div>
-        <div style="flex:1;background:#1c0a0a;border:1px solid #7f1d1d;border-radius:6px;padding:12px;text-align:center;">
-            <div style="font-size:22px;font-weight:700;color:#fca5a5;">{len(critical)}</div>
-            <div style="font-size:11px;color:#9ca3af;">Critical</div>
-        </div>
-        <div style="flex:1;background:#1c1100;border:1px solid #78350f;border-radius:6px;padding:12px;text-align:center;">
-            <div style="font-size:22px;font-weight:700;color:#fcd34d;">{len(high)}</div>
-            <div style="font-size:11px;color:#9ca3af;">High</div>
-        </div>
-        <div style="flex:1;background:#1a0a0e;border:1px solid #9f1239;border-radius:6px;padding:12px;text-align:center;">
-            <div style="font-size:22px;font-weight:700;color:#f9a8d4;">{len(zero_days)}</div>
-            <div style="font-size:11px;color:#9ca3af;">Zero-Days</div>
-        </div>
-    </div>
-    {zd_banner}
-    <div style="background:#0d1117;border:1px solid #2a2a2a;border-radius:6px;padding:16px;margin-bottom:16px;">
-        <h2 style="margin:0 0 10px;font-size:13px;color:#9ca3af;text-transform:uppercase;letter-spacing:.05em;">Recommended Actions</h2>
-        <ul style="margin:0;padding-left:16px;font-size:13px;color:#e5e7eb;line-height:1.8;">{recs_html}</ul>
-    </div>
-    {critical_table}
-    {high_table}
-    <div style="text-align:center;padding:16px;font-size:11px;color:#4b5563;">
-        <p style="margin:0;">Concentrix Endpoint Security · Security Advisory Monitor (Python v1)</p>
-        <p style="margin:4px 0 0;">Monitoring {SOURCE_COUNT} sources ·
-            <a href="https://ssipankajsingh.github.io/security-advisory-dashboard/" style="color:#60a5fa;">View Dashboard</a>
-        </p>
-    </div>
-</div></body></html>"""
-
-@app.route("/email-digest", methods=["POST"])
-@require_auth
-def email_digest():
-    if not SENDGRID_API_KEY:
-        return jsonify({"error": "SendGrid not configured"}), 503
-
-    data = request.get_json() or {}
-    to   = data.get("to")
-    from_email = data.get("from", "secadvisory@yourdomain.com")
-
-    if not to:
-        return jsonify({"error": "Missing 'to' email address"}), 400
-
-    try:
-        all_advisories = fetch_all_advisories()
-        html = build_email_html(all_advisories)
-
-        critical  = [a for a in all_advisories if a.get("severity") == "Critical"]
-        zero_days = [a for a in all_advisories if a.get("zeroDay")]
-
-        subject = (
-            f"🚨 [URGENT] {len(zero_days)} Zero-Day(s) — Security Advisory Digest {datetime.now().strftime('%d/%m/%Y')}"
-            if zero_days else
-            f"🛡️ Security Advisory Digest — {len(critical)} Critical, {datetime.now().strftime('%d/%m/%Y')}"
-        )
-
-        sg = SendGridAPIClient(SENDGRID_API_KEY)
-        message = Mail(from_email=from_email, to_emails=to, subject=subject, html_content=html)
-        sg.send(message)
-
-        log.info(f"[EMAIL] Digest sent to {to} — {len(all_advisories)} advisories")
-        return jsonify({"success": True, "sent": len(all_advisories), "to": to})
-
-    except Exception as e:
-        log.error(f"[EMAIL] Error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-# ─── ACKNOWLEDGE ENDPOINTS ────────────────────────────────────────────────────
-
+# ─── ACKNOWLEDGE ──────────────────────────────────────────────────────────────
 @app.route("/ack", methods=["GET"])
 @require_auth
 def get_acks():
-    """Return all acknowledgments from Supabase."""
     acks = supa_get_acks()
-    return jsonify({"acks": acks, "count": len(acks), "persistent": bool(SUPABASE_URL)})
+    return jsonify({"acks":acks,"count":len(acks),"persistent":bool(SUPABASE_URL)})
 
 @app.route("/ack", methods=["POST"])
 @require_auth
 def set_ack():
-    """Acknowledge an advisory — saved to Supabase."""
     data        = request.get_json() or {}
-    advisory_id = data.get("id", "").strip()
-    by          = data.get("by", "Team Member").strip()[:50]
-    note        = data.get("note", "").strip()[:200]
-    if not advisory_id:
-        return jsonify({"error": "Missing advisory id"}), 400
+    advisory_id = data.get("id","").strip()
+    by          = data.get("by","Team Member").strip()[:50]
+    note        = data.get("note","").strip()[:300]
+    if not advisory_id: return jsonify({"error":"Missing advisory id"}), 400
     ok = supa_set_ack(advisory_id, by, note)
     at = datetime.now(timezone.utc).isoformat()
-    log.info(f"[ACK] {advisory_id} acknowledged by {by} — Supabase: {ok}")
-    return jsonify({"success": True, "id": advisory_id, "by": by, "at": at, "persisted": ok})
+    log.info(f"[ACK] {advisory_id} by {by}")
+    return jsonify({"success":True,"id":advisory_id,"by":by,"at":at,"note":note,"persisted":ok})
 
 @app.route("/ack/<path:advisory_id>", methods=["DELETE"])
 @require_auth
 def clear_ack(advisory_id):
-    """Remove acknowledgment from Supabase."""
-    ok = supa_delete_ack(advisory_id)
-    if ok:
-        return jsonify({"success": True})
-    return jsonify({"error": "Delete failed or not found"}), 404
+    data = request.get_json() or {}
+    by   = data.get("by","").strip()
+    ok   = supa_delete_ack(advisory_id, by)
+    if ok: return jsonify({"success":True})
+    return jsonify({"error":"Delete failed or not authorised — only the person who acknowledged can undo"}), 403
 
+# ─── CACHE MANAGEMENT ─────────────────────────────────────────────────────────
 @app.route("/cache/clear", methods=["POST"])
 @require_auth
 def clear_advisory_cache():
-    """Clear all cached advisories from Supabase."""
-    if not (SUPABASE_URL and SUPABASE_KEY):
-        return jsonify({"error": "Supabase not configured"}), 503
+    if not (SUPABASE_URL and SUPABASE_KEY): return jsonify({"error":"Supabase not configured"}), 503
     try:
-        r = requests.delete(
-            f"{SUPABASE_URL}/rest/v1/advisory_cache?fetched_at=gte.2000-01-01",
-            headers=supa_headers(), timeout=10
-        )
-        log.info(f"[SUPABASE] Advisory cache cleared: {r.status_code}")
-        return jsonify({"success": True})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        r = requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_cache?fetched_at=gte.2000-01-01",
+                            headers=supa_headers(), timeout=10)
+        log.info(f"[CACHE] Cleared: {r.status_code}")
+        return jsonify({"success":True})
+    except Exception as e: return jsonify({"error":str(e)}), 500
+
+@app.route("/source-config", methods=["GET"])
+@require_auth
+def get_source_config():
+    return jsonify({"config":supa_get_source_config()})
+
+@app.route("/source-config", methods=["POST"])
+@require_auth
+def set_source_config_route():
+    data = request.get_json() or {}
+    ok = supa_set_source_config(data.get("id",""), data.get("enabled",True), data.get("by","Team Member"))
+    return jsonify({"success":ok})
 
 @app.route("/source-config/clear", methods=["POST"])
 @require_auth
 def clear_source_config():
-    """Clear shared source config from Supabase — resets to defaults."""
-    if not (SUPABASE_URL and SUPABASE_KEY):
-        return jsonify({"error": "Supabase not configured"}), 503
+    if not (SUPABASE_URL and SUPABASE_KEY): return jsonify({"error":"Supabase not configured"}), 503
     try:
-        r = requests.delete(
-            f"{SUPABASE_URL}/rest/v1/source_config?updated_at=gte.2000-01-01",
-            headers=supa_headers(), timeout=10
-        )
-        log.info(f"[SUPABASE] Source config cleared: {r.status_code}")
-        return jsonify({"success": True})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-        
-# ─── TEAMS WEBHOOK ────────────────────────────────────────────────────────────
+        r = requests.delete(f"{SUPABASE_URL}/rest/v1/source_config?updated_at=gte.2000-01-01",
+                            headers=supa_headers(), timeout=10)
+        return jsonify({"success":True})
+    except Exception as e: return jsonify({"error":str(e)}), 500
 
-def send_teams_card(webhook_url: str, advisories: list):
-    critical  = [a for a in advisories if a.get("severity") == "Critical"]
+# ─── EMAIL ────────────────────────────────────────────────────────────────────
+def build_email_html(advisories:list) -> str:
+    critical  = [a for a in advisories if a.get("severity")=="Critical"]
+    high      = [a for a in advisories if a.get("severity")=="High"]
     zero_days = [a for a in advisories if a.get("zeroDay")]
-    high      = [a for a in advisories if a.get("severity") == "High"]
     today     = datetime.now().strftime("%A, %d %B %Y")
+    recs = []
+    if zero_days: recs.append(f"🚨 {len(zero_days)} zero-day exploit(s) — patch immediately")
+    if critical:  recs.append(f"⚠️ {len(critical)} critical CVEs require action within 24 hours")
+    if any("microsoft" in a.get("source","").lower() for a in advisories): recs.append("🪟 Microsoft patches available — schedule via WSUS/Intune")
+    if any("fortinet" in a.get("title","").lower() for a in advisories): recs.append("🔒 Fortinet advisory — verify FortiOS patch status")
+    if any("cisco" in a.get("title","").lower() for a in advisories): recs.append("🌐 Cisco advisory — review IOS XE/ASA exposure")
+    if not recs: recs.append("✅ No critical action items today")
+    def rows(items, n=10):
+        out=""
+        for a in items[:n]:
+            sc={"Critical":"#7f1d1d","High":"#78350f"}.get(a.get("severity",""),"#1e3a5f")
+            cve=f'<code style="color:#60a5fa;font-size:11px;margin-left:6px;">{a["cve"]}</code>' if a.get("cve") else ""
+            out+=f'<tr><td style="padding:6px 10px;border-bottom:1px solid #2a2a2a;"><span style="background:{sc};color:#fff;font-size:10px;padding:1px 6px;border-radius:3px;">{a.get("severity","?")}</span>{cve}</td><td style="padding:6px 10px;border-bottom:1px solid #2a2a2a;color:#e5e7eb;font-size:12px;">{a.get("title","")[:90]}</td><td style="padding:6px 10px;border-bottom:1px solid #2a2a2a;color:#9ca3af;font-size:11px;">{a.get("source","")}</td></tr>'
+        return out
+    zd = f'<div style="background:#2d0a0a;border:1px solid #dc2626;border-radius:6px;padding:12px 16px;margin-bottom:16px;"><p style="margin:0;font-size:13px;color:#fca5a5;">🚨 <strong>{len(zero_days)} Zero-Day(s)</strong> — Immediate patching required.</p></div>' if zero_days else ""
+    ct = f'<div style="background:#161616;border:1px solid #2a2a2a;border-radius:6px;margin-bottom:16px;overflow:hidden;"><div style="padding:12px 16px;border-bottom:1px solid #2a2a2a;"><h2 style="margin:0;font-size:13px;color:#fca5a5;text-transform:uppercase;">Critical Advisories</h2></div><table style="width:100%;border-collapse:collapse;"><tr style="background:#1a1a1a;"><th style="padding:6px 10px;text-align:left;font-size:11px;color:#6b7280;">Severity</th><th style="padding:6px 10px;text-align:left;font-size:11px;color:#6b7280;">Title</th><th style="padding:6px 10px;text-align:left;font-size:11px;color:#6b7280;">Source</th></tr>{rows(critical)}</table></div>' if critical else ""
+    ht = f'<div style="background:#161616;border:1px solid #2a2a2a;border-radius:6px;margin-bottom:16px;overflow:hidden;"><div style="padding:12px 16px;border-bottom:1px solid #2a2a2a;"><h2 style="margin:0;font-size:13px;color:#fcd34d;text-transform:uppercase;">High Severity</h2></div><table style="width:100%;border-collapse:collapse;"><tr style="background:#1a1a1a;"><th style="padding:6px 10px;text-align:left;font-size:11px;color:#6b7280;">Severity</th><th style="padding:6px 10px;text-align:left;font-size:11px;color:#6b7280;">Title</th><th style="padding:6px 10px;text-align:left;font-size:11px;color:#6b7280;">Source</th></tr>{rows(high,8)}</table></div>' if high else ""
+    recs_html="".join(f"<li>{r}</li>" for r in recs)
+    return f"""<!DOCTYPE html><html><head><meta charset="UTF-8"></head>
+<body style="background:#0f0f0f;font-family:Arial,sans-serif;color:#e5e7eb;margin:0;padding:0;">
+<div style="max-width:680px;margin:0 auto;padding:24px 16px;">
+<div style="background:#161616;border:1px solid #2a2a2a;border-radius:8px;padding:20px 24px;margin-bottom:16px;">
+<h1 style="margin:0;font-size:17px;font-weight:600;color:#fff;">🛡️ Security Advisory Daily Digest</h1>
+<p style="margin:4px 0 0;font-size:12px;color:#9ca3af;">Concentrix Endpoint Security — {today}</p></div>
+<div style="display:flex;gap:10px;margin-bottom:16px;">
+<div style="flex:1;background:#161616;border:1px solid #2a2a2a;border-radius:6px;padding:12px;text-align:center;"><div style="font-size:22px;font-weight:700;color:#fff;">{len(advisories)}</div><div style="font-size:11px;color:#9ca3af;">Total</div></div>
+<div style="flex:1;background:#1c0a0a;border:1px solid #7f1d1d;border-radius:6px;padding:12px;text-align:center;"><div style="font-size:22px;font-weight:700;color:#fca5a5;">{len(critical)}</div><div style="font-size:11px;color:#9ca3af;">Critical</div></div>
+<div style="flex:1;background:#1c1100;border:1px solid #78350f;border-radius:6px;padding:12px;text-align:center;"><div style="font-size:22px;font-weight:700;color:#fcd34d;">{len(high)}</div><div style="font-size:11px;color:#9ca3af;">High</div></div>
+<div style="flex:1;background:#1a0a0e;border:1px solid #9f1239;border-radius:6px;padding:12px;text-align:center;"><div style="font-size:22px;font-weight:700;color:#f9a8d4;">{len(zero_days)}</div><div style="font-size:11px;color:#9ca3af;">Zero-Days</div></div>
+</div>{zd}
+<div style="background:#0d1117;border:1px solid #2a2a2a;border-radius:6px;padding:16px;margin-bottom:16px;">
+<h2 style="margin:0 0 10px;font-size:13px;color:#9ca3af;text-transform:uppercase;">Recommended Actions</h2>
+<ul style="margin:0;padding-left:16px;font-size:13px;color:#e5e7eb;line-height:1.8;">{recs_html}</ul></div>
+{ct}{ht}
+<div style="text-align:center;padding:16px;font-size:11px;color:#4b5563;">
+<p style="margin:0;">Concentrix Endpoint Security · Security Advisory Monitor v2</p>
+<p style="margin:4px 0 0;">Monitoring {SOURCE_COUNT} sources · <a href="https://ssipankajsingh.github.io/security-advisory-dashboard/" style="color:#60a5fa;">View Dashboard</a></p>
+</div></div></body></html>"""
 
-    top_items = list({a["id"]: a for a in zero_days + critical}.values())[:8]
-    facts = [
-        {
-            "name":  ("🔴 0-DAY" if a.get("zeroDay") else "🟠 CRITICAL") + " — " + (a.get("source") or a.get("vendor") or "Unknown"),
-            "value": (a.get("title") or a.get("id") or "")[:100] + (f" ({a['cve']})" if a.get("cve") else ""),
-        }
-        for a in top_items
-    ]
+@app.route("/email-digest", methods=["POST"])
+@require_auth
+def email_digest():
+    if not SENDGRID_API_KEY: return jsonify({"error":"SendGrid not configured"}), 503
+    data = request.get_json() or {}
+    to   = data.get("to")
+    if not to: return jsonify({"error":"Missing 'to'"}), 400
+    from_email = data.get("from","secadvisory@yourdomain.com")
+    try:
+        all_adv   = fetch_all_advisories()
+        html      = build_email_html(all_adv)
+        zero_days = [a for a in all_adv if a.get("zeroDay")]
+        critical  = [a for a in all_adv if a.get("severity")=="Critical"]
+        subject = (f"🚨 [URGENT] {len(zero_days)} Zero-Day(s) — Security Advisory Digest {datetime.now().strftime('%d/%m/%Y')}"
+                   if zero_days else f"🛡️ Security Advisory Digest — {len(critical)} Critical, {datetime.now().strftime('%d/%m/%Y')}")
+        sg = SendGridAPIClient(SENDGRID_API_KEY)
+        sg.send(Mail(from_email=from_email, to_emails=to, subject=subject, html_content=html))
+        log.info(f"[EMAIL] Sent to {to} — {len(all_adv)} advisories")
+        return jsonify({"success":True,"sent":len(all_adv),"to":to})
+    except Exception as e: log.error(f"[EMAIL] {e}"); return jsonify({"error":str(e)}), 500
 
-    payload = {
-        "type": "message",
-        "attachments": [{
-            "contentType": "application/vnd.microsoft.card.adaptive",
-            "content": {
-                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                "type": "AdaptiveCard",
-                "version": "1.4",
-                "body": [
-                    {
-                        "type": "Container",
-                        "style": "attention" if zero_days else "warning",
-                        "items": [{
-                            "type": "ColumnSet",
-                            "columns": [
-                                {"type": "Column", "width": "auto",
-                                 "items": [{"type": "TextBlock", "text": "🛡️", "size": "ExtraLarge"}]},
-                                {"type": "Column", "width": "stretch", "items": [
-                                    {"type": "TextBlock", "text": "Security Advisory Alert",
-                                     "weight": "Bolder", "size": "Large",
-                                     "color": "Attention" if zero_days else "Warning"},
-                                    {"type": "TextBlock",
-                                     "text": "Concentrix Endpoint Security · " + today,
-                                     "size": "Small", "isSubtle": True, "spacing": "None"},
-                                ]},
-                            ],
-                        }],
-                    },
-                    {
-                        "type": "ColumnSet",
-                        "columns": [
-                            {"type": "Column", "width": "stretch",
-                             "items": [{"type": "TextBlock", "text": "**" + str(len(advisories)) + "**\nTotal",
-                                        "wrap": True, "horizontalAlignment": "Center"}]},
-                            {"type": "Column", "width": "stretch",
-                             "items": [{"type": "TextBlock", "text": "**" + str(len(critical)) + "**\nCritical",
-                                        "wrap": True, "horizontalAlignment": "Center", "color": "Attention"}]},
-                            {"type": "Column", "width": "stretch",
-                             "items": [{"type": "TextBlock", "text": "**" + str(len(high)) + "**\nHigh",
-                                        "wrap": True, "horizontalAlignment": "Center", "color": "Warning"}]},
-                            {"type": "Column", "width": "stretch",
-                             "items": [{"type": "TextBlock",
-                                        "text": "**" + str(len(zero_days)) + "**\nZero-Days",
-                                        "wrap": True, "horizontalAlignment": "Center",
-                                        "color": "Attention" if zero_days else "Default"}]},
-                        ],
-                    },
-                    *([ {
-                        "type": "Container", "style": "emphasis",
-                        "items": [
-                            {"type": "TextBlock",
-                             "text": "⚠️ Immediate Action Required" if zero_days else "Top Critical Advisories",
-                             "weight": "Bolder", "size": "Medium"},
-                            {"type": "FactSet", "facts": facts},
-                        ],
-                    }] if facts else []),
-                    {
-                        "type": "ActionSet",
-                        "actions": [{
-                            "type": "Action.OpenUrl",
-                            "title": "🔍 Open Dashboard",
-                            "url": "https://ssipankajsingh.github.io/security-advisory-dashboard/",
-                            "style": "positive",
-                        }],
-                    },
-                ],
-            },
-        }],
-    }
-
+# ─── TEAMS ────────────────────────────────────────────────────────────────────
+def send_teams_card(webhook_url:str, advisories:list):
+    critical  = [a for a in advisories if a.get("severity")=="Critical"]
+    zero_days = [a for a in advisories if a.get("zeroDay")]
+    high      = [a for a in advisories if a.get("severity")=="High"]
+    today     = datetime.now().strftime("%A, %d %B %Y")
+    top       = list({a["id"]:a for a in zero_days+critical}.values())[:8]
+    facts     = [{"name":("🔴 0-DAY" if a.get("zeroDay") else "🟠 CRITICAL")+" — "+(a.get("source") or a.get("vendor") or ""),
+                  "value":(a.get("title") or a.get("id") or "")[:100]+(f" ({a['cve']})" if a.get("cve") else "")} for a in top]
+    payload = {"type":"message","attachments":[{"contentType":"application/vnd.microsoft.card.adaptive","content":{
+        "$schema":"http://adaptivecards.io/schemas/adaptive-card.json","type":"AdaptiveCard","version":"1.4",
+        "body":[
+            {"type":"Container","style":"attention" if zero_days else "warning","items":[{"type":"ColumnSet","columns":[
+                {"type":"Column","width":"auto","items":[{"type":"TextBlock","text":"🛡️","size":"ExtraLarge"}]},
+                {"type":"Column","width":"stretch","items":[
+                    {"type":"TextBlock","text":"Security Advisory Alert","weight":"Bolder","size":"Large","color":"Attention" if zero_days else "Warning"},
+                    {"type":"TextBlock","text":"Concentrix Endpoint Security · "+today,"size":"Small","isSubtle":True,"spacing":"None"},
+                ]},
+            ]}]},
+            {"type":"ColumnSet","columns":[
+                {"type":"Column","width":"stretch","items":[{"type":"TextBlock","text":"**"+str(len(advisories))+"**\nTotal","wrap":True,"horizontalAlignment":"Center"}]},
+                {"type":"Column","width":"stretch","items":[{"type":"TextBlock","text":"**"+str(len(critical))+"**\nCritical","wrap":True,"horizontalAlignment":"Center","color":"Attention"}]},
+                {"type":"Column","width":"stretch","items":[{"type":"TextBlock","text":"**"+str(len(high))+"**\nHigh","wrap":True,"horizontalAlignment":"Center","color":"Warning"}]},
+                {"type":"Column","width":"stretch","items":[{"type":"TextBlock","text":"**"+str(len(zero_days))+"**\nZero-Days","wrap":True,"horizontalAlignment":"Center","color":"Attention" if zero_days else "Default"}]},
+            ]},
+            *([ {"type":"Container","style":"emphasis","items":[
+                {"type":"TextBlock","text":"⚠️ Immediate Action Required" if zero_days else "Top Critical Advisories","weight":"Bolder","size":"Medium"},
+                {"type":"FactSet","facts":facts},
+            ]}] if facts else []),
+            {"type":"ActionSet","actions":[{"type":"Action.OpenUrl","title":"🔍 Open Dashboard",
+                "url":"https://ssipankajsingh.github.io/security-advisory-dashboard/","style":"positive"}]},
+        ],
+    }}]}
     resp = requests.post(webhook_url, json=payload, timeout=10)
     return resp.status_code
 
@@ -1114,60 +707,59 @@ def send_teams_card(webhook_url: str, advisories: list):
 def teams_notify():
     data = request.get_json() or {}
     webhook_url = data.get("webhookUrl") or TEAMS_WEBHOOK
-
-    if not webhook_url:
-        return jsonify({"error": "No Teams webhook URL provided"}), 400
-
+    if not webhook_url: return jsonify({"error":"No webhook URL"}), 400
     try:
-        all_advisories = fetch_all_advisories()
-        status = send_teams_card(webhook_url, all_advisories)
-
-        log.info(f"[TEAMS] Notification sent — status {status} — {len(all_advisories)} advisories")
-        return jsonify({
-            "success":  True,
-            "sent":     len(all_advisories),
-            "critical": len([a for a in all_advisories if a.get("severity") == "Critical"]),
-            "zeroDays": len([a for a in all_advisories if a.get("zeroDay")]),
-        })
-    except Exception as e:
-        log.error(f"[TEAMS] Error: {e}")
-        return jsonify({"error": str(e)}), 500
+        all_adv = fetch_all_advisories()
+        status  = send_teams_card(webhook_url, all_adv)
+        return jsonify({"success":True,"sent":len(all_adv),
+            "critical":len([a for a in all_adv if a.get("severity")=="Critical"]),
+            "zeroDays":len([a for a in all_adv if a.get("zeroDay")])})
+    except Exception as e: log.error(f"[TEAMS] {e}"); return jsonify({"error":str(e)}), 500
 
 # ─── SCHEDULED JOBS ───────────────────────────────────────────────────────────
-
 def scheduled_email():
-    """Daily email digest at 07:30 UTC."""
-    if not (SENDGRID_API_KEY and DIGEST_EMAIL):
-        return
-    log.info("[CRON] Running scheduled email digest...")
+    if not (SENDGRID_API_KEY and DIGEST_EMAIL): return
+    log.info("[CRON] Running email digest...")
     try:
         with app.test_client() as client:
-            client.post("/email-digest",
-                        json={"to": DIGEST_EMAIL},
-                        headers={"x-access-code": ACCESS_CODE})
-        log.info("[CRON] Email digest sent")
-    except Exception as e:
-        log.error(f"[CRON] Email failed: {e}")
+            client.post("/email-digest", json={"to":DIGEST_EMAIL}, headers={"x-access-code":ACCESS_CODE})
+        log.info("[CRON] Email sent")
+    except Exception as e: log.error(f"[CRON] Email: {e}")
 
 def scheduled_teams():
-    """Daily Teams notification at 07:35 UTC."""
-    if not TEAMS_WEBHOOK:
-        return
-    log.info("[CRON] Running scheduled Teams notification...")
+    if not TEAMS_WEBHOOK: return
+    log.info("[CRON] Running Teams notification...")
+    try: send_teams_card(TEAMS_WEBHOOK, fetch_all_advisories()); log.info("[CRON] Teams sent")
+    except Exception as e: log.error(f"[CRON] Teams: {e}")
+
+def is_patch_tuesday() -> bool:
+    """True if today is the 2nd Tuesday of the month."""
+    now = datetime.now()
+    if now.weekday() != 1: return False  # Not Tuesday
+    return 8 <= now.day <= 14
+
+def scheduled_patch_tuesday():
+    """Special Microsoft-only digest on Patch Tuesday."""
+    if not is_patch_tuesday(): return
+    if not (SENDGRID_API_KEY and DIGEST_EMAIL): return
+    log.info("[CRON] Patch Tuesday digest running...")
     try:
-        all_advisories = fetch_all_advisories()
-        send_teams_card(TEAMS_WEBHOOK, all_advisories)
-        log.info("[CRON] Teams notification sent")
-    except Exception as e:
-        log.error(f"[CRON] Teams failed: {e}")
+        all_adv  = fetch_all_advisories()
+        ms_adv   = [a for a in all_adv if "microsoft" in a.get("source","").lower() or "msrc" in a.get("source","").lower()]
+        if not ms_adv: return
+        html = build_email_html(ms_adv)
+        subject = f"🪟 Patch Tuesday — {len(ms_adv)} Microsoft Advisories — {datetime.now().strftime('%d/%m/%Y')}"
+        sg = SendGridAPIClient(SENDGRID_API_KEY)
+        sg.send(Mail(from_email="secadvisory@yourdomain.com", to_emails=DIGEST_EMAIL, subject=subject, html_content=html))
+        log.info(f"[CRON] Patch Tuesday digest sent — {len(ms_adv)} MS advisories")
+    except Exception as e: log.error(f"[CRON] Patch Tuesday: {e}")
 
 scheduler = BackgroundScheduler(timezone="UTC")
-scheduler.add_job(scheduled_email, "cron", hour=7, minute=30)
-scheduler.add_job(scheduled_teams, "cron", hour=7, minute=35)
+scheduler.add_job(scheduled_email,         "cron", hour=2,  minute=30)   # 8:00 AM IST
+scheduler.add_job(scheduled_teams,         "cron", hour=2,  minute=35)   # 8:05 AM IST
+scheduler.add_job(scheduled_patch_tuesday, "cron", hour=3,  minute=0)    # 8:30 AM IST on Patch Tuesdays
+scheduler.add_job(supa_purge_old_acks,     "cron", hour=0,  minute=0)    # Midnight UTC — purge old acks
 scheduler.start()
-
-# ─── START ────────────────────────────────────────────────────────────────────
-START_TIME = time.time()
 
 if __name__ == "__main__":
     log.info(f"✅ Proxy listening on port {PORT}")
