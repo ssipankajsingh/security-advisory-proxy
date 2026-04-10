@@ -170,7 +170,7 @@ def supa_load_advisory_cache() -> list:
             log.info(f"[SUPABASE] Advisory cache loaded: {len(advisories)} items")
             return advisories
     except Exception as e:
-        log.error(f"[SUPABASE] load_advisory_cache error: {e}")
+        log.exception("[SUPABASE] load_advisory_cache error")
     return []
 
 def supa_get_source_config() -> dict:
