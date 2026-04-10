@@ -283,7 +283,7 @@ TRUSTED_FEEDS = {
   "ivanti_security":           "https://forums.ivanti.com/s/rss/security-advisories",
   "citrix_security":           "https://www.citrix.com/blogs/security/rss.xml",
   "splunk_security":           "https://www.splunk.com/en_us/rss/security-advisories.xml",
-  "cert_global_master":        "https://raw.githubusercontent.com/pulsedive/certrss/master/feeds.csv"
+  "cert_global_master":        "https://raw.githubusercontent.com/pulsedive/certrss/master/feeds.csv",
 
     # ══ ENDPOINT & THREAT INTEL (7) ══════════════════════════════════════════
     "crowdstrike": "https://www.crowdstrike.com/blog/feed",
