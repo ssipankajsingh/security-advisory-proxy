@@ -162,7 +162,7 @@ def supa_load_advisory_cache() -> list:
     try:
         r = requests.get(
             f"{SUPABASE_URL}/rest/v1/advisory_cache?select=data&order=fetched_at.desc&limit=1000", headers={**supa_headers(), "Range-Unit": "items", "Range": "0-999"},
-            headers=supa_headers(), timeout=10
+            timeout=10
         )
         if r.status_code == 200:
             rows = r.json()
