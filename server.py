@@ -143,8 +143,8 @@ TRUSTED_FEEDS = {
 
     # ══ TIER 0: MASTER AGGREGATORS ═══════════════════════════════════════════
     "cvefeed_all":           "https://cvefeed.io/rssfeed/",
-    "cvefeed_high_critical": "https://cvefeed.io/rssfeed/high.xml",
-    "github_advisories":     "https://github.com/advisories.atom",
+    "cvefeed_high_critical": "https://cvefeed.io/rssfeed/latest.xml",
+    "cvefeed_high":     "https://cvefeed.io/rssfeed/severity/high.xml",
     "cvedaily_all":          "https://cvedaily.com/feed.xml",
     "cvedaily_new":          "https://cvedaily.com/feed-new.xml",
     "cvedaily_critical":     "https://cvedaily.com/feed-critical.xml",
@@ -234,6 +234,7 @@ TRUSTED_FEEDS = {
     "talos":        "https://feeds.feedburner.com/feedburner/Talos",
     "unit42":       "https://unit42.paloaltonetworks.com/feed/",
     "msft_ti":      "https://www.microsoft.com/en-us/security/blog/feed/",
+    "microsoft_m":  "https://api.msrc.microsoft.com/update-guide/rss",
     "secureworks":  "https://www.secureworks.com/blog/rss",
     "recorded_fut": "https://www.recordedfuture.com/category/research/feed/",
 
