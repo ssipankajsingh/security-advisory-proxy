@@ -51,15 +51,30 @@ def supa_get_acks() -> dict:
     try:
         r = requests.get(f"{SUPABASE_URL}/rest/v1/acknowledgments?select=*", headers=supa_headers(), timeout=8)
         if r.status_code == 200:
-            return {row["id"]:{"by":row["acknowledged_by"],"at":row["acknowledged_at"],"note":row.get("note","")} for row in r.json()}
+            return {row["id"]:{
+                "by":          row["acknowledged_by"],
+                "at":          row["acknowledged_at"],
+                "note":        row.get("note",""),
+                "status":      row.get("status","In Review"),
+                "assigned_to": row.get("assigned_to",""),
+                "ai_triage":   row.get("ai_triage",""),
+            } for row in r.json()}
     except Exception as e: log.error(f"[SUPABASE] get_acks: {e}")
     return {}
 
-def supa_set_ack(advisory_id:str, by:str, note:str="") -> bool:
+def supa_set_ack(advisory_id:str, by:str, note:str="", status:str="In Review", assigned_to:str="", ai_triage:str="") -> bool:
     if not (SUPABASE_URL and SUPABASE_KEY): return False
     try:
         h = {**supa_headers(),"Prefer":"resolution=merge-duplicates,return=representation"}
-        payload = {"id":advisory_id,"acknowledged_by":by,"acknowledged_at":datetime.now(timezone.utc).isoformat(),"note":note}
+        payload = {
+            "id":              advisory_id,
+            "acknowledged_by": by,
+            "acknowledged_at": datetime.now(timezone.utc).isoformat(),
+            "note":            note,
+            "status":          status,
+            "assigned_to":     assigned_to,
+            "ai_triage":       ai_triage,
+        }
         r = requests.post(f"{SUPABASE_URL}/rest/v1/acknowledgments", headers=h, json=payload, timeout=8)
         return r.status_code in (200,201)
     except Exception as e: log.error(f"[SUPABASE] set_ack: {e}"); return False
@@ -89,28 +104,43 @@ def supa_save_advisory_cache(advisories:list) -> bool:
         now = datetime.now(timezone.utc).isoformat()
         rows = [{"id":a["id"][:500],"data":{**a,"isNew":False},"fetched_at":now} for a in advisories[:2500] if a.get("id")]
         h = {**supa_headers(),"Prefer":"resolution=merge-duplicates"}
-        for i in range(0, len(rows), 200):
-            r = requests.post(f"{SUPABASE_URL}/rest/v1/advisory_cache", headers=h, json=rows[i:i+200], timeout=15)
-            if r.status_code not in (200,201): log.warning(f"[SUPABASE] Cache batch {i} failed: {r.status_code}")
+        saved = 0
+        for i in range(0, len(rows), 100):
+            r = requests.post(f"{SUPABASE_URL}/rest/v1/advisory_cache", headers=h, json=rows[i:i+100], timeout=20)
+            if r.status_code not in (200,201): log.warning(f"[SUPABASE] Cache batch {i//100} failed: {r.status_code}")
+            else: saved += len(rows[i:i+100])
         # Purge items older than 90 days
         cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
         requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_cache?fetched_at=lt.{cutoff}", headers=supa_headers(), timeout=10)
-        log.info(f"[SUPABASE] Cache saved: {len(rows)} items")
+        log.info(f"[SUPABASE] Cache saved: {saved}/{len(rows)} items")
         return True
     except Exception as e: log.error(f"[SUPABASE] save_cache: {e}"); return False
 
 def supa_load_advisory_cache() -> list:
+    """Load all rows from advisory_cache in paginated 1000-row chunks (handles 2500+ rows)."""
     if not (SUPABASE_URL and SUPABASE_KEY): return []
-    try:
-        r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/advisory_cache?select=data&order=fetched_at.desc&limit=1000",
-            headers={**supa_headers(),"Range-Unit":"items","Range":"0-999"}, timeout=10)
-        if r.status_code == 200:
-            items = [row["data"] for row in r.json() if row.get("data")]
-            log.info(f"[SUPABASE] Cache loaded: {len(items)} items")
-            return items
-    except Exception as e: log.error(f"[SUPABASE] load_cache: {e}")
-    return []
+    all_items = []
+    offset = 0
+    chunk = 1000
+    while True:
+        try:
+            url = (f"{SUPABASE_URL}/rest/v1/advisory_cache"
+                   f"?select=data&order=fetched_at.desc&limit={chunk}&offset={offset}")
+            r = requests.get(url, headers=supa_headers(), timeout=15)
+            if r.status_code != 200:
+                log.warning(f"[SUPABASE] load_cache page offset={offset}: HTTP {r.status_code}")
+                break
+            rows = r.json()
+            items = [row["data"] for row in rows if row.get("data")]
+            all_items.extend(items)
+            if len(rows) < chunk:
+                break  # last page
+            offset += chunk
+        except Exception as e:
+            log.error(f"[SUPABASE] load_cache page offset={offset}: {e}")
+            break
+    log.info(f"[SUPABASE] Cache loaded: {len(all_items)} items (paginated, {offset+chunk} rows scanned)")
+    return all_items
 
 def supa_get_source_config() -> dict:
     if not (SUPABASE_URL and SUPABASE_KEY): return {}
@@ -143,8 +173,8 @@ TRUSTED_FEEDS = {
 
     # ══ TIER 0: MASTER AGGREGATORS ═══════════════════════════════════════════
     "cvefeed_all":           "https://cvefeed.io/rssfeed/",
-    "cvefeed_high_critical": "https://cvefeed.io/rssfeed/latest.xml",
-    "cvefeed_high":     "https://cvefeed.io/rssfeed/severity/high.xml",
+    "cvefeed_high_critical": "https://cvefeed.io/rssfeed/high.xml",
+    "github_advisories":     "https://github.com/advisories.atom",
     "cvedaily_all":          "https://cvedaily.com/feed.xml",
     "cvedaily_new":          "https://cvedaily.com/feed-new.xml",
     "cvedaily_critical":     "https://cvedaily.com/feed-critical.xml",
@@ -234,7 +264,6 @@ TRUSTED_FEEDS = {
     "talos":        "https://feeds.feedburner.com/feedburner/Talos",
     "unit42":       "https://unit42.paloaltonetworks.com/feed/",
     "msft_ti":      "https://www.microsoft.com/en-us/security/blog/feed/",
-    "microsoft_m":  "https://api.msrc.microsoft.com/update-guide/rss",
     "secureworks":  "https://www.secureworks.com/blog/rss",
     "recorded_fut": "https://www.recordedfuture.com/category/research/feed/",
 
@@ -320,10 +349,35 @@ def extract_author(entry) -> str:
     return a[:80]
 
 def dedupe(advisories:list) -> list:
-    seen = set(); result = []
+    """
+    Deduplicate by CVE ID (preferred) or advisory ID.
+    When the same CVE appears from multiple sources, the OEM/Tier-1 entry
+    wins over aggregators/news — regardless of arrival order.
+    """
+    # First pass: bucket by key, collecting all entries per CVE
+    buckets: dict = {}
     for a in advisories:
         key = (a.get("cve") or a.get("id","")[:60]).lower()
-        if key and key not in seen: seen.add(key); result.append(a)
+        if not key:
+            continue
+        if key not in buckets:
+            buckets[key] = []
+        buckets[key].append(a)
+
+    result = []
+    for key, entries in buckets.items():
+        if len(entries) == 1:
+            result.append(entries[0])
+        else:
+            # Prefer OEM direct source over aggregators/news
+            oem_entries = [e for e in entries if e.get("isOEM")]
+            chosen = oem_entries[0] if oem_entries else entries[0]
+            # Enrich chosen entry with source count info for the badge
+            chosen["source_count"] = len(entries)
+            chosen["sources_list"] = list(dict.fromkeys(
+                e.get("source") or e.get("vendor","") for e in entries
+            ))[:8]
+            result.append(chosen)
     return result
 
 def fmt_ts(dt_str:str) -> str:
@@ -462,14 +516,16 @@ def fetch_all_advisories() -> list:
             try: results.extend(future.result())
             except Exception as e: log.error(f"Thread error: {e}")
 
-    results = dedupe(results)
+    # ── Sort BEFORE dedupe so OEM entries always win the dedup race ──
     sev_order = {"Critical":0,"High":1,"Medium":2,"Low":3,"Unknown":4}
     results.sort(key=lambda a: (
-        0 if a.get("isOEM") else 1,                           # OEM first
+        0 if a.get("isOEM") else 1,                            # OEM first
         sev_order.get(a.get("severity","Unknown"),4),
         not a.get("zeroDay",False),
         -(datetime.fromisoformat(a["published"].replace("Z","+00:00")).timestamp() if a.get("published") else 0),
     ))
+
+    results = dedupe(results)   # dedupe after sort — OEM entry is always first in each bucket
     return results
 
 # ─── AUTH ─────────────────────────────────────────────────────────────────────
@@ -552,11 +608,15 @@ def set_ack():
     advisory_id = data.get("id","").strip()
     by          = data.get("by","Team Member").strip()[:50]
     note        = data.get("note","").strip()[:300]
+    status      = data.get("status","In Review").strip()[:50]
+    assigned_to = data.get("assigned_to","").strip()[:80]
+    ai_triage   = data.get("ai_triage","").strip()[:500]
     if not advisory_id: return jsonify({"error":"Missing advisory id"}), 400
-    ok = supa_set_ack(advisory_id, by, note)
+    ok = supa_set_ack(advisory_id, by, note, status, assigned_to, ai_triage)
     at = datetime.now(timezone.utc).isoformat()
-    log.info(f"[ACK] {advisory_id} by {by}")
-    return jsonify({"success":True,"id":advisory_id,"by":by,"at":at,"note":note,"persisted":ok})
+    log.info(f"[ACK] {advisory_id} by {by} → {status}" + (f" → {assigned_to}" if assigned_to else ""))
+    return jsonify({"success":True,"id":advisory_id,"by":by,"at":at,"note":note,
+                    "status":status,"assigned_to":assigned_to,"ai_triage":ai_triage,"persisted":ok})
 
 @app.route("/ack/<path:advisory_id>", methods=["DELETE"])
 @require_auth
