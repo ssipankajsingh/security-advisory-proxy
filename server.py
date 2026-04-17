@@ -182,7 +182,6 @@ TRUSTED_FEEDS = {
     # ══ GOVERNMENT & CERT ════════════════════════════════════════════════════
     "cisa_alerts":       "https://www.cisa.gov/cybersecurity-advisories/all.xml",
     "cisa_kev":          "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
-    "cisa_ics":          "https://www.cisa.gov/ics/advisories/rss.xml",
     "ncsc_uk":           "https://www.ncsc.gov.uk/api/1/services/v1/report-rss-feed.xml",
     "us_cert":           "https://www.cisa.gov/cybersecurity-advisories/all.xml",
     "cert_eu":           "https://cert.europa.eu/publications/security-advisories-rss",
@@ -213,7 +212,6 @@ TRUSTED_FEEDS = {
     "cisco":        "https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml",
     "fortinet":     "https://www.fortiguard.com/rss/ir.xml",
     "paloalto":     "https://security.paloaltonetworks.com/rss.xml",
-    "paloalto_psirt":"https://securityadvisories.paloaltonetworks.com/rss.xml",
     "sonicwall":    "https://blog.sonicwall.com/feed/",
     "ivanti":       "https://forums.ivanti.com/s/rss/security-advisories",
     "f5":           "https://support.f5.com/rss/security-advisories.xml",
@@ -243,8 +241,8 @@ TRUSTED_FEEDS = {
     "okta":         "https://sec.okta.com/feed/",
 
     # ══ MIDDLEWARE / DB ═══════════════════════════════════════════════════════
-    "mozilla":      "https://blog.mozilla.org/security/feed/",
-    "openssl":      "https://openssl-library.org/news/feed.xml",
+    "mozilla":      "https://www.mozilla.org/en-US/security/advisories/",
+    "sslStore":      "https://www.thesslstore.com/blog/feed/",
     "apache":       "https://blogs.apache.org/foundation/feed/entries/rss",
     "oracle":       "https://www.oracle.com/security-alerts/rss/",
     "vmware":       "https://www.vmware.com/security/advisories.xml",
