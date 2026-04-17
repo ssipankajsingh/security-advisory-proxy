@@ -104,15 +104,15 @@ def supa_save_advisory_cache(advisories:list) -> bool:
         now = datetime.now(timezone.utc).isoformat()
         rows = [{"id":a["id"][:500],"data":{**a,"isNew":False},"fetched_at":now} for a in advisories[:2500] if a.get("id")]
         h = {**supa_headers(),"Prefer":"resolution=merge-duplicates"}
+        # P4: Truncate first so table always contains EXACTLY what was just fetched
+        requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_cache?fetched_at=gte.2000-01-01",
+                        headers=supa_headers(), timeout=10)
         saved = 0
         for i in range(0, len(rows), 100):
             r = requests.post(f"{SUPABASE_URL}/rest/v1/advisory_cache", headers=h, json=rows[i:i+100], timeout=20)
             if r.status_code not in (200,201): log.warning(f"[SUPABASE] Cache batch {i//100} failed: {r.status_code}")
             else: saved += len(rows[i:i+100])
-        # Purge items older than 90 days
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
-        requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_cache?fetched_at=lt.{cutoff}", headers=supa_headers(), timeout=10)
-        log.info(f"[SUPABASE] Cache saved: {saved}/{len(rows)} items")
+        log.info(f"[SUPABASE] Cache saved: {saved}/{len(rows)} items (table truncated first)")
         return True
     except Exception as e: log.error(f"[SUPABASE] save_cache: {e}"); return False
 
