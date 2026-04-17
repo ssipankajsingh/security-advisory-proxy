@@ -134,12 +134,12 @@ def supa_load_advisory_cache() -> list:
             items = [row["data"] for row in rows if row.get("data")]
             all_items.extend(items)
             if len(rows) < chunk:
-                break  # last page
+                break
             offset += chunk
         except Exception as e:
             log.error(f"[SUPABASE] load_cache page offset={offset}: {e}")
             break
-    log.info(f"[SUPABASE] Cache loaded: {len(all_items)} items (paginated, {offset+chunk} rows scanned)")
+    log.info(f"[SUPABASE] Cache loaded: {len(all_items)} items (paginated)")
     return all_items
 
 def supa_get_source_config() -> dict:
@@ -349,30 +349,20 @@ def extract_author(entry) -> str:
     return a[:80]
 
 def dedupe(advisories:list) -> list:
-    """
-    Deduplicate by CVE ID (preferred) or advisory ID.
-    When the same CVE appears from multiple sources, the OEM/Tier-1 entry
-    wins over aggregators/news — regardless of arrival order.
-    """
-    # First pass: bucket by key, collecting all entries per CVE
+    """Dedupe by CVE ID. OEM/Tier-1 entry wins over aggregators/news regardless of arrival order."""
     buckets: dict = {}
     for a in advisories:
         key = (a.get("cve") or a.get("id","")[:60]).lower()
-        if not key:
-            continue
-        if key not in buckets:
-            buckets[key] = []
+        if not key: continue
+        if key not in buckets: buckets[key] = []
         buckets[key].append(a)
-
     result = []
     for key, entries in buckets.items():
         if len(entries) == 1:
             result.append(entries[0])
         else:
-            # Prefer OEM direct source over aggregators/news
             oem_entries = [e for e in entries if e.get("isOEM")]
             chosen = oem_entries[0] if oem_entries else entries[0]
-            # Enrich chosen entry with source count info for the badge
             chosen["source_count"] = len(entries)
             chosen["sources_list"] = list(dict.fromkeys(
                 e.get("source") or e.get("vendor","") for e in entries
@@ -516,15 +506,14 @@ def fetch_all_advisories() -> list:
             try: results.extend(future.result())
             except Exception as e: log.error(f"Thread error: {e}")
 
-    # ── Sort BEFORE dedupe so OEM entries always win the dedup race ──
+    # Sort BEFORE dedupe so OEM entries always win the dedup race
     sev_order = {"Critical":0,"High":1,"Medium":2,"Low":3,"Unknown":4}
     results.sort(key=lambda a: (
-        0 if a.get("isOEM") else 1,                            # OEM first
+        0 if a.get("isOEM") else 1,
         sev_order.get(a.get("severity","Unknown"),4),
         not a.get("zeroDay",False),
         -(datetime.fromisoformat(a["published"].replace("Z","+00:00")).timestamp() if a.get("published") else 0),
     ))
-
     results = dedupe(results)   # dedupe after sort — OEM entry is always first in each bucket
     return results
 
@@ -614,7 +603,7 @@ def set_ack():
     if not advisory_id: return jsonify({"error":"Missing advisory id"}), 400
     ok = supa_set_ack(advisory_id, by, note, status, assigned_to, ai_triage)
     at = datetime.now(timezone.utc).isoformat()
-    log.info(f"[ACK] {advisory_id} by {by} → {status}" + (f" → {assigned_to}" if assigned_to else ""))
+    log.info(f"[ACK] {advisory_id} by {by} → {status}")
     return jsonify({"success":True,"id":advisory_id,"by":by,"at":at,"note":note,
                     "status":status,"assigned_to":assigned_to,"ai_triage":ai_triage,"persisted":ok})
 
