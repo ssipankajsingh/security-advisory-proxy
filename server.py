@@ -104,28 +104,31 @@ def supa_save_advisory_cache(advisories:list) -> bool:
         now = datetime.now(timezone.utc).isoformat()
         rows = [{"id":a["id"][:500],"data":{**a,"isNew":False},"fetched_at":now} for a in advisories[:2500] if a.get("id")]
         h = {**supa_headers(),"Prefer":"resolution=merge-duplicates"}
-        # P4: Truncate first so table always contains EXACTLY what was just fetched
-        requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_cache?fetched_at=gte.2000-01-01",
-                        headers=supa_headers(), timeout=10)
         saved = 0
         for i in range(0, len(rows), 100):
             r = requests.post(f"{SUPABASE_URL}/rest/v1/advisory_cache", headers=h, json=rows[i:i+100], timeout=20)
             if r.status_code not in (200,201): log.warning(f"[SUPABASE] Cache batch {i//100} failed: {r.status_code}")
             else: saved += len(rows[i:i+100])
-        log.info(f"[SUPABASE] Cache saved: {saved}/{len(rows)} items (table truncated first)")
+        # Purge items older than 30 days — keeps dashboard fresh
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_cache?fetched_at=lt.{cutoff}", headers=supa_headers(), timeout=10)
+        log.info(f"[SUPABASE] Cache purge: removed entries fetched before {cutoff[:10]}")
+        log.info(f"[SUPABASE] Cache saved: {saved}/{len(rows)} items")
         return True
     except Exception as e: log.error(f"[SUPABASE] save_cache: {e}"); return False
 
 def supa_load_advisory_cache() -> list:
-    """Load all rows from advisory_cache in paginated 1000-row chunks (handles 2500+ rows)."""
+    """Load advisory_cache rows, only items fetched in the last 30 days (keeps feed fresh)."""
     if not (SUPABASE_URL and SUPABASE_KEY): return []
     all_items = []
     offset = 0
     chunk = 1000
+    # Only load rows fetched within the last 30 days — prevents old stale advisories appearing
+    cutoff_date = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
     while True:
         try:
             url = (f"{SUPABASE_URL}/rest/v1/advisory_cache"
-                   f"?select=data&order=fetched_at.desc&limit={chunk}&offset={offset}")
+                   f"?select=data&fetched_at=gte.{cutoff_date}&order=fetched_at.desc&limit={chunk}&offset={offset}")
             r = requests.get(url, headers=supa_headers(), timeout=15)
             if r.status_code != 200:
                 log.warning(f"[SUPABASE] load_cache page offset={offset}: HTTP {r.status_code}")
@@ -134,12 +137,12 @@ def supa_load_advisory_cache() -> list:
             items = [row["data"] for row in rows if row.get("data")]
             all_items.extend(items)
             if len(rows) < chunk:
-                break
+                break  # last page
             offset += chunk
         except Exception as e:
             log.error(f"[SUPABASE] load_cache page offset={offset}: {e}")
             break
-    log.info(f"[SUPABASE] Cache loaded: {len(all_items)} items (paginated)")
+    log.info(f"[SUPABASE] Cache loaded: {len(all_items)} items (last 30 days only, {offset+chunk} rows scanned)")
     return all_items
 
 def supa_get_source_config() -> dict:
@@ -182,6 +185,7 @@ TRUSTED_FEEDS = {
     # ══ GOVERNMENT & CERT ════════════════════════════════════════════════════
     "cisa_alerts":       "https://www.cisa.gov/cybersecurity-advisories/all.xml",
     "cisa_kev":          "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
+    "cisa_ics":          "https://www.cisa.gov/ics/advisories/rss.xml",
     "ncsc_uk":           "https://www.ncsc.gov.uk/api/1/services/v1/report-rss-feed.xml",
     "us_cert":           "https://www.cisa.gov/cybersecurity-advisories/all.xml",
     "cert_eu":           "https://cert.europa.eu/publications/security-advisories-rss",
@@ -212,6 +216,7 @@ TRUSTED_FEEDS = {
     "cisco":        "https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml",
     "fortinet":     "https://www.fortiguard.com/rss/ir.xml",
     "paloalto":     "https://security.paloaltonetworks.com/rss.xml",
+    "paloalto_psirt":"https://securityadvisories.paloaltonetworks.com/rss.xml",
     "sonicwall":    "https://blog.sonicwall.com/feed/",
     "ivanti":       "https://forums.ivanti.com/s/rss/security-advisories",
     "f5":           "https://support.f5.com/rss/security-advisories.xml",
@@ -241,8 +246,8 @@ TRUSTED_FEEDS = {
     "okta":         "https://sec.okta.com/feed/",
 
     # ══ MIDDLEWARE / DB ═══════════════════════════════════════════════════════
-    "mozilla":      "https://www.mozilla.org/en-US/security/advisories/",
-    "sslStore":      "https://www.thesslstore.com/blog/feed/",
+    "mozilla":      "https://blog.mozilla.org/security/feed/",
+    "openssl":      "https://openssl-library.org/news/feed.xml",
     "apache":       "https://blogs.apache.org/foundation/feed/entries/rss",
     "oracle":       "https://www.oracle.com/security-alerts/rss/",
     "vmware":       "https://www.vmware.com/security/advisories.xml",
@@ -347,20 +352,30 @@ def extract_author(entry) -> str:
     return a[:80]
 
 def dedupe(advisories:list) -> list:
-    """Dedupe by CVE ID. OEM/Tier-1 entry wins over aggregators/news regardless of arrival order."""
+    """
+    Deduplicate by CVE ID (preferred) or advisory ID.
+    When the same CVE appears from multiple sources, the OEM/Tier-1 entry
+    wins over aggregators/news — regardless of arrival order.
+    """
+    # First pass: bucket by key, collecting all entries per CVE
     buckets: dict = {}
     for a in advisories:
         key = (a.get("cve") or a.get("id","")[:60]).lower()
-        if not key: continue
-        if key not in buckets: buckets[key] = []
+        if not key:
+            continue
+        if key not in buckets:
+            buckets[key] = []
         buckets[key].append(a)
+
     result = []
     for key, entries in buckets.items():
         if len(entries) == 1:
             result.append(entries[0])
         else:
+            # Prefer OEM direct source over aggregators/news
             oem_entries = [e for e in entries if e.get("isOEM")]
             chosen = oem_entries[0] if oem_entries else entries[0]
+            # Enrich chosen entry with source count info for the badge
             chosen["source_count"] = len(entries)
             chosen["sources_list"] = list(dict.fromkeys(
                 e.get("source") or e.get("vendor","") for e in entries
@@ -504,14 +519,15 @@ def fetch_all_advisories() -> list:
             try: results.extend(future.result())
             except Exception as e: log.error(f"Thread error: {e}")
 
-    # Sort BEFORE dedupe so OEM entries always win the dedup race
+    # ── Sort BEFORE dedupe so OEM entries always win the dedup race ──
     sev_order = {"Critical":0,"High":1,"Medium":2,"Low":3,"Unknown":4}
     results.sort(key=lambda a: (
-        0 if a.get("isOEM") else 1,
+        0 if a.get("isOEM") else 1,                            # OEM first
         sev_order.get(a.get("severity","Unknown"),4),
         not a.get("zeroDay",False),
         -(datetime.fromisoformat(a["published"].replace("Z","+00:00")).timestamp() if a.get("published") else 0),
     ))
+
     results = dedupe(results)   # dedupe after sort — OEM entry is always first in each bucket
     return results
 
@@ -566,10 +582,21 @@ def advisories():
                     "advisories":cached[:2500],"source":"cache"})
         # Live fetch
         all_adv = fetch_all_advisories()
-        if SUPABASE_URL and all_adv:
-            threading.Thread(target=supa_save_advisory_cache, args=(all_adv,), daemon=True).start()
-        return jsonify({"total":len(all_adv),"generated":datetime.now(timezone.utc).isoformat(),
-            "advisories":all_adv[:2500],"source":"live"})
+        # Filter to last 30 days published — prevents historically old RSS items from surfacing
+        cutoff_30d = datetime.now(timezone.utc) - timedelta(days=30)
+        recent_adv = []
+        for a in all_adv:
+            try:
+                pub = datetime.fromisoformat(a.get("published","").replace("Z","+00:00"))
+                if pub >= cutoff_30d:
+                    recent_adv.append(a)
+            except Exception:
+                recent_adv.append(a)  # keep items with unparseable dates
+        log.info(f"[ADVISORIES] Live: {len(all_adv)} total, {len(recent_adv)} within 30 days")
+        if SUPABASE_URL and recent_adv:
+            threading.Thread(target=supa_save_advisory_cache, args=(recent_adv,), daemon=True).start()
+        return jsonify({"total":len(recent_adv),"generated":datetime.now(timezone.utc).isoformat(),
+            "advisories":recent_adv[:2500],"source":"live"})
     except Exception as e:
         log.error(f"[ADVISORIES] {e}")
         return jsonify({"error":"Failed to fetch advisories"}), 500
@@ -601,7 +628,7 @@ def set_ack():
     if not advisory_id: return jsonify({"error":"Missing advisory id"}), 400
     ok = supa_set_ack(advisory_id, by, note, status, assigned_to, ai_triage)
     at = datetime.now(timezone.utc).isoformat()
-    log.info(f"[ACK] {advisory_id} by {by} → {status}")
+    log.info(f"[ACK] {advisory_id} by {by} → {status}" + (f" → {assigned_to}" if assigned_to else ""))
     return jsonify({"success":True,"id":advisory_id,"by":by,"at":at,"note":note,
                     "status":status,"assigned_to":assigned_to,"ai_triage":ai_triage,"persisted":ok})
 
