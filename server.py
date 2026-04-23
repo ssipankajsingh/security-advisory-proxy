@@ -282,6 +282,97 @@ TRUSTED_FEEDS = {
     "schneier":     "https://www.schneier.com/feed/atom/",
     "reddit_netsec":"https://www.reddit.com/r/netsec/.rss",
     "threatpost":   "https://threatpost.com/feed/",
+    # ══ NEWLY ADDED VENDORS (from missing vendor audit Apr 2026) ═════════════
+
+    # OS & PLATFORM — ENTERPRISE
+    "dell_security":       "https://www.dell.com/support/security/rss.xml",
+    "ibm_psirt":           "https://www.ibm.com/blogs/psirt/feed/",
+    "intel_security":      "https://www.intel.com/content/www/us/en/security-center/default.html",
+    "nvidia_security":     "https://www.nvidia.com/object/nvidia-rss.xml",
+    "qualcomm_security":   "https://docs.qualcomm.com/product/publicresources/securitybulletin/rss.xml",
+    "samsung_security":    "https://semiconductor.samsung.com/rss/security/",
+
+    # NETWORK / SECURITY APPLIANCES
+    "huawei_psirt":        "https://www.huawei.com/en/rss-feeds/psirt",
+    "asus_security":       "https://www.asus.com/security-advisory/rss",
+    "tplink_security":     "https://www.tp-link.com/security.xml",
+    "netapp_security":     "https://security.netapp.com/atom.xml",
+    "openvpn_security":    "https://openvpn.net/security-advisories/feed/",
+    "thales_psirt":        "https://www.thalesgroup.com/en/global/group/psirt/feed",
+    "apc_schneider":       "https://www.se.com/ww/en/rss/security-notifications.xml",
+    "zscaler_security":    "https://www.zscaler.com/security-advisories/rss",
+
+    # ENDPOINT / IDENTITY
+    "crowdstrike_edr":     "https://www.crowdstrike.com/security-advisories/feed/",
+    "kaspersky_security":  "https://support.kaspersky.com/rss/vulnerability.rss",
+    "cyberark_security":   "https://www.cyberark.com/product-security/rss",
+    "veritas_security":    "https://www.veritas.com/support/en_US/security.rss",
+    "commvault_security":  "https://documentation.commvault.com/securityadvisories/rss.xml",
+    "yubico_advisories":   "https://www.yubico.com/support/security-advisories/feed/",
+    "symantec_broadcom":   "https://www.broadcom.com/rss/security-advisories.xml",
+    "lexmark_security":    "https://www.lexmark.com/en_us/solutions/security/lexmark-security-advisories/rss.xml",
+    "zebra_security":      "https://www.zebra.com/rss/security-alerts.xml",
+    "ricoh_security":      "https://www.ricoh.com/rss/security-alerts.rss",
+
+    # CLOUD / SaaS
+    "zoom_security":       "https://explore.zoom.us/en/trust/security/security-bulletin/feed/",
+    "salesforce_security": "https://security.salesforce.com/security-advisories.rss",
+    "newrelic_security":   "https://docs.newrelic.com/docs/security/security-privacy/information-security/security-bulletins/rss.xml",
+    "uipath_security":     "https://www.uipath.com/trust-security-advisories.rss",
+    "mongodb_security":    "https://www.mongodb.com/blog/channel/security/rss",
+
+    # BROWSER / MIDDLEWARE / DEV TOOLS
+    "adobe_security":      "https://helpx.adobe.com/security/home.xml",
+    "jenkins_security":    "https://www.jenkins.io/security/advisories/rss.xml",
+    "nodejs_security":     "https://nodejs.org/en/feed/vulnerability.xml",
+    "mariadb_security":    "https://mariadb.com/kb/en/security/rss/",
+    "postgresql_security": "https://www.postgresql.org/news/pgsql-announce/",
+    "libreoffice_security":"https://www.libreoffice.org/news-and-events/rss/",
+    "ruby_security":       "https://www.ruby-lang.org/en/security/feed/",
+    "foxit_security":      "https://www.foxit.com/rss/security-bulletins.rss",
+    "wireshark_security":  "https://www.wireshark.org/news/rss.xml",
+    "jetbrains_security":  "https://www.jetbrains.com/privacy-security/issues-fixed/rss",
+    "teamviewer_security": "https://www.teamviewer.com/en/resources/trust-center/security-bulletins/rss/",
+    "avaya_security":      "https://support.avaya.com/rss/security.xml",
+    "autodesk_security":   "https://www.autodesk.com/trust/security-advisories/rss.xml",
+    "zimbra_security":     "https://wiki.zimbra.com/wiki/Special:RecentChanges&feed=rss",
+    "pgadmin_news":        "https://www.pgadmin.org/rss.xml",
+
+    # ══ BATCH 2 ADDITIONS (url_LIST.xlsx audit Apr 2026) ═════════════════════
+
+    # OS & PLATFORM
+    "lenovo_security":    "https://support.lenovo.com/us/en/product_security/rss",
+    "amd_security":       "https://www.amd.com/en/resources/product-security.html/rss",
+    "hp_security":        "https://support.hp.com/wps/mss/rss/en_US/security-bulletins",
+    "acer_security":      "https://community.acer.com/en/kb/categories/1623-security-vulnerabilities/feed",
+
+    # NETWORK
+    "arista_security":    "https://www.arista.com/en/support/advisories-notices/security-advisory/rss",
+    "mitel_security":     "https://www.mitel.com/support/security-advisories/rss",
+    "forcepoint_security":"https://support.forcepoint.com/rss/security-advisories",
+
+    # CLOUD
+    "nutanix_security":   "https://portal.nutanix.com/page/documents/security-advisories/list/rss",
+
+    # ENDPOINT
+    "beyondtrust_security":"https://www.beyondtrust.com/rss/security-advisories",
+    "brother_security":   "https://support.brother.com/g/s/security/rss/en/",
+    "marvell_security":   "https://www.marvell.com/rss/security-advisories.xml",
+
+    # BROWSER / MIDDLEWARE
+    "sap_security":       "https://www.sap.com/rss/content/whatsnew.xml",
+    "devolutions_security":"https://devolutions.net/security/advisories/rss",
+
+    # GOVERNMENT
+    "cccs_alerts":        "https://www.cyber.gc.ca/api/en/alerts-advisories/feed/rss",
+
+    # THREAT INTEL
+    "qualys_blog":        "https://blog.qualys.com/feed",
+
+    # NEWS
+    "cybersecnews":       "https://cybersecuritynews.com/feed/",
+    "gbhackers":          "https://gbhackers.com/feed/",
+    "cyberinsider":       "https://cyberinsider.com/feed/",
 }
 
 SOURCE_COUNT = len(TRUSTED_FEEDS)
@@ -293,6 +384,19 @@ OEM_TIER1 = {
     "redhat","android","oracle","splunk","veeam","cisa_kev","cisa_alerts","cisa_ics",
     "ncsc_uk","cert_eu","cert_in","zdi_published","mozilla","openssl","cortex_xdr",
     "netskope","forescout","aws","gcp","msrc_blog","trellix",
+    # Newly added OEM Tier 1
+    "dell_security","ibm_psirt","intel_security","nvidia_security","huawei_psirt",
+    "asus_security","tplink_security","netapp_security","openvpn_security","thales_psirt",
+    "apc_schneider","zscaler_security","kaspersky_security","cyberark_security",
+    "veritas_security","commvault_security","yubico_advisories","symantec_broadcom",
+    "lexmark_security","zoom_security","salesforce_security","adobe_security",
+    "jenkins_security","nodejs_security","mariadb_security","postgresql_security",
+    "ruby_security","foxit_security","teamviewer_security","avaya_security",
+    "autodesk_security","qualcomm_security","newrelic_security",
+    # Batch 2
+    "lenovo_security","amd_security","hp_security","arista_security",
+    "mitel_security","forcepoint_security","nutanix_security","beyondtrust_security",
+    "marvell_security","sap_security","cccs_alerts",
 }
 
 # ─── STARTUP LOG ──────────────────────────────────────────────────────────────
