@@ -621,6 +621,7 @@ def normalise_entry(entry, source:str) -> dict:
         "isNews":           is_news,
     }
     advisory["data_quality"] = data_quality(advisory)
+    advisory["fetched_at"]   = datetime.now(timezone.utc).isoformat()
     return advisory
 
 # ─── FETCH ────────────────────────────────────────────────────────────────────
@@ -670,7 +671,8 @@ def fetch_mozilla_json() -> list:
                 "severity":parse_severity(combined),"cvss":extract_cvss_v3(combined),
                 "cve":extract_cve(combined),"cves":extract_all_cves(combined),
                 "zeroDay":is_zero_day(combined),"source":"mozilla","vendor":"Mozilla","url":link,
-                "products":[],"author":"","tags":[],"isOEM":True})
+                "products":[],"author":"","tags":[],"isOEM":True,
+                "fetched_at":datetime.now(timezone.utc).isoformat()})
         with cache_lock: cache["mozilla"] = items
         log.info(f"[mozilla] ✅ {len(items)} items (JSON)")
         return items
@@ -693,7 +695,8 @@ def fetch_cisa_kev() -> list:
                 "link":f"https://nvd.nist.gov/vuln/detail/{cve_id}","url":f"https://nvd.nist.gov/vuln/detail/{cve_id}",
                 "published":v.get("dateAdded",datetime.now(timezone.utc).isoformat()),
                 "severity":"Critical","cvss":None,"cve":cve_id,"cves":[cve_id],"zeroDay":True,
-                "source":"CISA KEV","vendor":"CISA","products":[v.get("product","")],"author":"","tags":["KEV"],"isOEM":True})
+                "source":"CISA KEV","vendor":"CISA","products":[v.get("product","")],"author":"","tags":["KEV"],"isOEM":True,
+                "fetched_at":datetime.now(timezone.utc).isoformat()})
         with cache_lock: cache["cisa_kev"] = items
         log.info(f"[cisa_kev] ✅ {len(items)} items")
         return items
@@ -821,6 +824,77 @@ def clear_ack(advisory_id):
     return jsonify({"error":"Delete failed or not authorised — only the person who acknowledged can undo"}), 403
 
 # ─── CACHE MANAGEMENT ─────────────────────────────────────────────────────────
+@app.route("/feed-check")
+@require_auth
+def feed_check():
+    """
+    Check if a single RSS feed URL is reachable and returns items.
+    Used by the Feed Health Monitor on the frontend.
+    Query params: url=<rss_feed_url>
+    Returns: {ok, item_count, last_item_date, http_code, error}
+    """
+    url = request.args.get("url","").strip()
+    if not url:
+        return jsonify({"ok":False,"error":"No URL provided","item_count":0}), 400
+    if not url.startswith("http"):
+        return jsonify({"ok":False,"error":"Invalid URL","item_count":0}), 400
+
+    try:
+        resp = requests.get(url, timeout=12, headers={
+            "User-Agent":"SecurityAdvisoryBot/2.0 (Feed Health Monitor)",
+            "Accept":"application/rss+xml,application/atom+xml,application/xml,text/xml,*/*",
+        }, allow_redirects=True)
+        http_code = resp.status_code
+        if resp.status_code >= 400:
+            return jsonify({
+                "ok":False,"item_count":0,"http_code":http_code,
+                "error":f"HTTP {http_code} — feed URL may have changed or moved"
+            })
+
+        feed = feedparser.parse(resp.content)
+        item_count = len(feed.entries or [])
+
+        # Get date of most recent item
+        last_item_date = None
+        if feed.entries:
+            entry = feed.entries[0]
+            for attr in ["published_parsed","updated_parsed"]:
+                val = getattr(entry, attr, None)
+                if val:
+                    try:
+                        last_item_date = datetime(*val[:6], tzinfo=timezone.utc).isoformat()
+                        break
+                    except: pass
+
+        # Bozo = feed parsed but had errors (malformed XML etc)
+        bozo_warning = None
+        if feed.bozo and item_count == 0:
+            bozo_warning = "Feed returned malformed XML — may still be partially functional"
+
+        return jsonify({
+            "ok": item_count > 0,
+            "item_count": item_count,
+            "last_item_date": last_item_date,
+            "http_code": http_code,
+            "feed_title": feed.feed.get("title","") if hasattr(feed,"feed") else "",
+            "error": bozo_warning if item_count == 0 else None,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+    except requests.exceptions.SSLError:
+        return jsonify({"ok":False,"item_count":0,"http_code":None,
+            "error":"SSL certificate error — feed may have changed domain"})
+    except requests.exceptions.ConnectionError:
+        return jsonify({"ok":False,"item_count":0,"http_code":None,
+            "error":"Connection refused — feed URL may no longer exist"})
+    except requests.exceptions.Timeout:
+        return jsonify({"ok":False,"item_count":0,"http_code":None,
+            "error":"Timeout after 12s — feed server not responding"})
+    except Exception as e:
+        return jsonify({"ok":False,"item_count":0,"http_code":None,
+            "error":str(e)[:120]})
+
+
 @app.route("/cache/clear", methods=["POST"])
 @require_auth
 def clear_advisory_cache():
