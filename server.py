@@ -493,37 +493,55 @@ def data_quality(advisory:dict) -> str:
     if score >= 3: return "partial"
     return "thin"
 
-def dedupe(advisories:list) -> list:
+def dedupe_and_enrich(items:list) -> list:
     """
-    Deduplicate by CVE ID (preferred) or advisory ID.
-    When the same CVE appears from multiple sources, the OEM/Tier-1 entry
-    wins over aggregators/news — regardless of arrival order.
+    Deduplicate advisories by CVE ID or URL, merging source information.
+    OEM entries always win (sorted first). Tracks all sources that reported each CVE.
     """
-    # First pass: bucket by key, collecting all entries per CVE
-    buckets: dict = {}
-    for a in advisories:
-        key = (a.get("cve") or a.get("id","")[:60]).lower()
-        if not key:
-            continue
-        if key not in buckets:
-            buckets[key] = []
-        buckets[key].append(a)
+    seen_cve  = {}
+    seen_url  = {}
+    out       = []
 
-    result = []
-    for key, entries in buckets.items():
-        if len(entries) == 1:
-            result.append(entries[0])
+    for a in items:
+        cve = (a.get("cve") or "").upper().strip()
+        uid = a.get("id","").strip()
+
+        merge_idx = None
+        if cve and cve.startswith("CVE-"):
+            merge_idx = seen_cve.get(cve)
+        if merge_idx is None:
+            merge_idx = seen_url.get(uid)
+
+        if merge_idx is not None:
+            existing = out[merge_idx]
+            sources_list = existing.get("sources_list", [existing.get("source","")])
+            new_src = a.get("source","")
+            if new_src and new_src not in sources_list:
+                sources_list.append(new_src)
+            out[merge_idx]["sources_list"]  = sources_list
+            out[merge_idx]["source_count"]  = len(sources_list)
+            out[merge_idx]["duplicate_cve"] = True
+            if not existing.get("cvss") and a.get("cvss"):
+                out[merge_idx]["cvss"] = a["cvss"]
+            if existing.get("severity","Unknown") == "Unknown" and a.get("severity","Unknown") != "Unknown":
+                out[merge_idx]["severity"] = a["severity"]
+            if not existing.get("description") and a.get("description"):
+                out[merge_idx]["description"] = a["description"]
+            if not existing.get("patch_info") and a.get("patch_info"):
+                out[merge_idx]["patch_info"] = a["patch_info"]
         else:
-            # Prefer OEM direct source over aggregators/news
-            oem_entries = [e for e in entries if e.get("isOEM")]
-            chosen = oem_entries[0] if oem_entries else entries[0]
-            # Enrich chosen entry with source count info for the badge
-            chosen["source_count"] = len(entries)
-            chosen["sources_list"] = list(dict.fromkeys(
-                e.get("source") or e.get("vendor","") for e in entries
-            ))[:8]
-            result.append(chosen)
-    return result
+            idx_new = len(out)
+            a["sources_list"]  = [a.get("source","")]
+            a["source_count"]  = 1
+            a["duplicate_cve"] = False
+            if cve and cve.startswith("CVE-"):
+                seen_cve[cve] = idx_new
+            seen_url[uid] = idx_new
+            out.append(a)
+
+    log.info(f"[DEDUPE] {len(items)} -> {len(out)} ({len(items)-len(out)} duplicates merged)")
+    return out
+
 
 def fmt_ts(dt_str:str) -> str:
     """Return ISO timestamp string."""
@@ -702,6 +720,57 @@ def fetch_cisa_kev() -> list:
         return items
     except Exception as e: log.error(f"[cisa_kev] Failed: {e}"); return []
 
+def enrich_with_epss(advisories:list) -> list:
+    """
+    Enrich advisories with EPSS scores from FIRST.org.
+    EPSS = Exploit Prediction Scoring System (0-1 probability score).
+    Free, no API key needed. Batches up to 100 CVEs per request.
+    """
+    cve_ids = list({a["cve"] for a in advisories if a.get("cve") and a["cve"].startswith("CVE-")})
+    if not cve_ids:
+        return advisories
+    epss_map = {}
+    # EPSS API allows comma-separated CVE IDs (up to 100 per request)
+    BATCH = 100
+    for i in range(0, len(cve_ids), BATCH):
+        batch = cve_ids[i:i+BATCH]
+        try:
+            resp = requests.get(
+                "https://api.first.org/data/v1/epss",
+                params={"cve": ",".join(batch), "limit": BATCH},
+                timeout=10,
+                headers={"User-Agent":"SecurityAdvisoryBot/2.0"}
+            )
+            if resp.status_code == 200:
+                for item in resp.json().get("data", []):
+                    cve = item.get("cve","").upper()
+                    epss_map[cve] = {
+                        "epss":  round(float(item.get("epss",  0)) * 100, 2),   # convert to %
+                        "percentile": round(float(item.get("percentile", 0)) * 100, 1),
+                        "date":  item.get("date","")
+                    }
+        except Exception as e:
+            log.warning(f"[EPSS] Batch {i//BATCH+1} failed: {e}")
+
+    # Apply EPSS data to advisories
+    for a in advisories:
+        cve = (a.get("cve","") or "").upper()
+        if cve in epss_map:
+            a["epss"]       = epss_map[cve]["epss"]
+            a["epss_pct"]   = epss_map[cve]["percentile"]
+            a["epss_date"]  = epss_map[cve]["date"]
+            # Auto-upgrade severity if EPSS is very high but severity is unknown/low
+            if a["epss"] >= 50 and a.get("severity","Unknown") in ("Unknown","Low"):
+                a["severity"] = "High"
+                a["epss_upgraded"] = True
+        else:
+            a["epss"]     = None
+            a["epss_pct"] = None
+
+    enriched = len(epss_map)
+    log.info(f"[EPSS] Enriched {enriched}/{len(cve_ids)} CVEs with EPSS scores")
+    return advisories
+
 def fetch_all_advisories() -> list:
     results = []; futures = {}
     with ThreadPoolExecutor(max_workers=25) as executor:
@@ -721,7 +790,12 @@ def fetch_all_advisories() -> list:
         -(datetime.fromisoformat(a["published"].replace("Z","+00:00")).timestamp() if a.get("published") else 0),
     ))
 
-    results = dedupe(results)   # dedupe after sort — OEM entry is always first in each bucket
+    results = dedupe_and_enrich(results)
+    # Enrich with EPSS scores (non-blocking — best effort)
+    try:
+        results = enrich_with_epss(results)
+    except Exception as e:
+        log.warning(f"[EPSS] Enrichment failed (non-fatal): {e}")
     return results
 
 # ─── AUTH ─────────────────────────────────────────────────────────────────────
@@ -972,6 +1046,257 @@ def build_email_html(advisories:list) -> str:
 <p style="margin:0;">Concentrix Endpoint Security · Security Advisory Monitor v2</p>
 <p style="margin:4px 0 0;">Monitoring {SOURCE_COUNT} sources · <a href="https://ssipankajsingh.github.io/security-advisory-dashboard/" style="color:#60a5fa;">View Dashboard</a></p>
 </div></div></body></html>"""
+
+@app.route("/notify/critical", methods=["POST"])
+@require_auth
+def notify_critical():
+    """
+    Instant alert for Critical/Zero-Day advisories.
+    Called from frontend when new critical items are detected in a refresh.
+    Sends Teams card + email immediately.
+    """
+    data = request.get_json() or {}
+    advisories = data.get("advisories", [])
+    webhook_url = data.get("webhookUrl", "")
+    to_email    = data.get("to", "")
+    from_email  = data.get("from", "")
+    sender_name = data.get("senderName", "Concentrix SOC Dashboard")
+
+    if not advisories:
+        return jsonify({"error": "No advisories provided"}), 400
+
+    sent = {"teams": False, "email": False}
+
+    # ── Teams instant alert ──────────────────────────────────────────
+    if webhook_url:
+        try:
+            critical  = [a for a in advisories if a.get("severity") == "Critical"]
+            zero_days = [a for a in advisories if a.get("zeroDay")]
+            top = sorted(advisories, key=lambda a: (
+                0 if a.get("zeroDay") else 1,
+                0 if a.get("severity") == "Critical" else 1
+            ))[:5]
+
+            facts = []
+            for a in top:
+                label = f"{'🔴 0-DAY ' if a.get('zeroDay') else ''}[{a.get('severity','?')}] {a.get('cve') or a.get('id','')[:40]}"
+                facts.append({"title": label, "value": (a.get("title",""))[:80]})
+
+            card = {
+                "type": "message",
+                "attachments": [{
+                    "contentType": "application/vnd.microsoft.card.adaptive",
+                    "content": {
+                        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                        "type": "AdaptiveCard", "version": "1.4",
+                        "body": [
+                            {"type":"TextBlock","size":"Large","weight":"Bolder",
+                             "text":f"🚨 INSTANT ALERT — {len(critical)} Critical, {len(zero_days)} Zero-Day",
+                             "color":"Attention"},
+                            {"type":"TextBlock","text":f"Detected at {datetime.now(timezone.utc).strftime('%d %b %Y %H:%M UTC')}","isSubtle":True,"wrap":True},
+                            {"type":"FactSet","facts":facts},
+                            {"type":"TextBlock","text":"⚡ Requires immediate attention. Open the dashboard for full details.","wrap":True,"color":"Warning"}
+                        ],
+                        "actions": [{"type":"Action.OpenUrl","title":"Open Dashboard",
+                            "url":"https://ssipankajsingh.github.io/security-advisory-dashboard/"}]
+                    }
+                }]
+            }
+            resp = requests.post(webhook_url, json=card, timeout=10)
+            sent["teams"] = resp.status_code in (200, 202)
+        except Exception as e:
+            log.warning(f"[ALERT] Teams failed: {e}")
+
+    # ── Email instant alert ──────────────────────────────────────────
+    if to_email and SENDGRID_KEY:
+        try:
+            top5 = sorted(advisories, key=lambda a: (0 if a.get("zeroDay") else 1, 0 if a.get("severity")=="Critical" else 1))[:5]
+            rows = "".join(f"""
+            <tr>
+              <td style="padding:6px 10px;border-bottom:1px solid #f0f0f0">
+                <span style="background:{'#dc2626' if a.get('severity')=='Critical' else '#ea580c'};color:#fff;border-radius:3px;padding:1px 6px;font-size:11px;font-weight:700">{a.get('severity','?')}</span>
+                {' <span style="background:#7c3aed;color:#fff;border-radius:3px;padding:1px 6px;font-size:11px">0-DAY</span>' if a.get('zeroDay') else ''}
+              </td>
+              <td style="padding:6px 10px;border-bottom:1px solid #f0f0f0;font-weight:600;color:#1a1a1a">{a.get('cve') or a.get('id','')[:40]}</td>
+              <td style="padding:6px 10px;border-bottom:1px solid #f0f0f0;color:#555">{(a.get('title',''))[:70]}</td>
+              <td style="padding:6px 10px;border-bottom:1px solid #f0f0f0;color:#888;font-size:12px">{a.get('source','')}</td>
+            </tr>""" for a in top5)
+
+            html = f"""<!DOCTYPE html><html><body style="font-family:Inter,sans-serif;background:#f5f5f5;padding:20px">
+            <div style="max-width:680px;margin:0 auto;background:#fff;border-radius:8px;overflow:hidden">
+              <div style="background:#dc2626;padding:20px 24px">
+                <h1 style="color:#fff;margin:0;font-size:20px">🚨 Instant Security Alert</h1>
+                <p style="color:#fca5a5;margin:6px 0 0;font-size:13px">
+                  {len([a for a in advisories if a.get('severity')=='Critical'])} Critical · 
+                  {len([a for a in advisories if a.get('zeroDay')])} Zero-Day · 
+                  Detected {datetime.now(timezone.utc).strftime('%d %b %Y %H:%M UTC')}
+                </p>
+              </div>
+              <div style="padding:20px 24px">
+                <p style="color:#444;font-size:13px;margin:0 0 16px">New critical advisories require your immediate attention:</p>
+                <table style="width:100%;border-collapse:collapse;font-size:13px">
+                  <thead><tr style="background:#f8f8f8">
+                    <th style="padding:8px 10px;text-align:left;color:#888;font-size:11px;text-transform:uppercase">Severity</th>
+                    <th style="padding:8px 10px;text-align:left;color:#888;font-size:11px;text-transform:uppercase">CVE</th>
+                    <th style="padding:8px 10px;text-align:left;color:#888;font-size:11px;text-transform:uppercase">Title</th>
+                    <th style="padding:8px 10px;text-align:left;color:#888;font-size:11px;text-transform:uppercase">Source</th>
+                  </tr></thead>
+                  <tbody>{rows}</tbody>
+                </table>
+                <div style="margin-top:20px;text-align:center">
+                  <a href="https://ssipankajsingh.github.io/security-advisory-dashboard/" 
+                     style="background:#dc2626;color:#fff;padding:10px 24px;border-radius:6px;text-decoration:none;font-weight:600;font-size:13px">
+                    Open Dashboard →
+                  </a>
+                </div>
+              </div>
+              <div style="background:#f8f8f8;padding:12px 24px;text-align:center;font-size:11px;color:#aaa">
+                Concentrix GSE · Security Advisory Dashboard · Instant Alert
+              </div>
+            </div></body></html>"""
+
+            payload = {
+                "personalizations": [{"to": [{"email": to_email}]}],
+                "from": {"email": from_email or "security-alerts@concentrix.com", "name": sender_name},
+                "subject": f"🚨 Instant Alert: {len([a for a in advisories if a.get('severity')=='Critical'])} Critical / {len([a for a in advisories if a.get('zeroDay')])} Zero-Day Advisories",
+                "content": [{"type": "text/html", "value": html}]
+            }
+            resp = requests.post("https://api.sendgrid.com/v3/mail/send",
+                headers={"Authorization":f"Bearer {SENDGRID_KEY}","Content-Type":"application/json"},
+                json=payload, timeout=15)
+            sent["email"] = resp.status_code == 202
+        except Exception as e:
+            log.warning(f"[ALERT] Email failed: {e}")
+
+    return jsonify({"success": True, "sent": sent, "count": len(advisories)})
+
+
+@app.route("/email-weekly", methods=["POST"])
+@require_auth
+def email_weekly():
+    """
+    Send a weekly summary report of top advisories.
+    Groups by severity, shows team acknowledgment stats, highlights zero-days.
+    """
+    data       = request.get_json() or {}
+    to_email   = data.get("to","")
+    from_email = data.get("from","")
+    sender_name= data.get("senderName","Concentrix SOC Dashboard")
+    week_start = data.get("weekStart","")  # ISO date string
+
+    if not to_email:
+        return jsonify({"error":"No recipient"}), 400
+
+    # Load advisories from cache
+    advisories = []
+    try:
+        advisories = supa_load_advisory_cache()
+    except Exception as e:
+        log.warning(f"[WEEKLY] Cache load failed: {e}")
+
+    if not advisories:
+        return jsonify({"error":"No advisory data available"}), 400
+
+    # Group by severity
+    by_sev = {"Critical":[],"High":[],"Medium":[],"Low":[],"Unknown":[]}
+    for a in advisories:
+        sev = a.get("severity","Unknown")
+        if sev in by_sev: by_sev[sev].append(a)
+
+    total     = len(advisories)
+    zero_days = [a for a in advisories if a.get("zeroDay")]
+    oem_items = [a for a in advisories if a.get("isOEM")]
+
+    def sev_section(sev, items, color):
+        if not items: return ""
+        top = items[:8]
+        rows = "".join(f"""
+        <tr>
+          <td style="padding:6px 10px;border-bottom:1px solid #f5f5f5;font-weight:600;font-size:12px;color:#1a1a1a">{a.get('cve') or a.get('id','')[:35]}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #f5f5f5;color:#555;font-size:12px">{(a.get('title',''))[:65]}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #f5f5f5;color:#888;font-size:11px">{a.get('source','')[:20]}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #f5f5f5;font-size:11px">
+            {'<span style="color:#9333ea;font-weight:700">0-DAY</span>' if a.get('zeroDay') else ''}
+            {'<span style="color:#15803d">OEM</span>' if a.get('isOEM') else ''}
+          </td>
+        </tr>""" for a in top)
+        more = f'<tr><td colspan="4" style="padding:6px 10px;color:#aaa;font-size:11px">+{len(items)-8} more {sev} advisories</td></tr>' if len(items)>8 else ""
+        return f"""
+        <h3 style="color:{color};font-size:14px;margin:20px 0 8px;padding-bottom:4px;border-bottom:2px solid {color}22">
+          {sev} ({len(items)})
+        </h3>
+        <table style="width:100%;border-collapse:collapse">
+          <thead><tr style="background:#f8f8f8">
+            <th style="padding:6px 10px;text-align:left;font-size:10px;color:#999;text-transform:uppercase">CVE / ID</th>
+            <th style="padding:6px 10px;text-align:left;font-size:10px;color:#999;text-transform:uppercase">Title</th>
+            <th style="padding:6px 10px;text-align:left;font-size:10px;color:#999;text-transform:uppercase">Source</th>
+            <th style="padding:6px 10px;text-align:left;font-size:10px;color:#999;text-transform:uppercase">Flags</th>
+          </tr></thead>
+          <tbody>{rows}{more}</tbody>
+        </table>"""
+
+    week_label = week_start or datetime.now(timezone.utc).strftime("Week of %d %b %Y")
+    html = f"""<!DOCTYPE html><html><body style="font-family:Inter,sans-serif;background:#f5f5f5;padding:20px;color:#1a1a1a">
+    <div style="max-width:700px;margin:0 auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.08)">
+      <!-- Header -->
+      <div style="background:#0a1e50;padding:24px 28px;display:flex;align-items:center;gap:16px">
+        <div style="background:#00C9B1;width:48px;height:30px;border-radius:15px;display:flex;align-items:center;justify-content:center">
+          <span style="color:#0a1e50;font-weight:800;font-size:14px">C</span>
+        </div>
+        <div>
+          <h1 style="color:#fff;margin:0;font-size:18px;font-weight:700">Weekly Security Advisory Summary</h1>
+          <p style="color:#94a3b8;margin:3px 0 0;font-size:12px">{week_label} · Concentrix GSE SOC Intelligence</p>
+        </div>
+      </div>
+      <!-- KPI Strip -->
+      <div style="display:flex;border-bottom:1px solid #f0f0f0">
+        {''.join(f'<div style="flex:1;padding:14px 10px;text-align:center;border-right:1px solid #f5f5f5"><div style="font-size:22px;font-weight:800;color:{c}">{v}</div><div style="font-size:10px;color:#aaa;font-weight:500;text-transform:uppercase;margin-top:2px">{l}</div></div>'
+          for l,v,c in [
+            ("Total", total, "#444"),
+            ("Critical", len(by_sev["Critical"]), "#dc2626"),
+            ("High", len(by_sev["High"]), "#ea580c"),
+            ("Zero-Days", len(zero_days), "#9333ea"),
+            ("OEM Direct", len(oem_items), "#15803d"),
+          ])}
+      </div>
+      <!-- Sections -->
+      <div style="padding:20px 28px">
+        {sev_section("Critical", by_sev["Critical"], "#dc2626")}
+        {sev_section("High", by_sev["High"], "#ea580c")}
+        {sev_section("Medium", by_sev["Medium"], "#ca8a04")}
+        {sev_section("Low", by_sev["Low"], "#16a34a")}
+        <!-- CTA -->
+        <div style="margin-top:24px;padding:16px;background:#f8f8f8;border-radius:8px;text-align:center">
+          <a href="https://ssipankajsingh.github.io/security-advisory-dashboard/"
+             style="background:#c0392b;color:#fff;padding:10px 28px;border-radius:6px;text-decoration:none;font-weight:600;font-size:13px">
+            Open Full Dashboard →
+          </a>
+        </div>
+      </div>
+      <div style="background:#f8f8f8;padding:12px 28px;text-align:center;font-size:11px;color:#aaa">
+        Concentrix GSE · Security Advisory Intelligence · Auto-generated Weekly Report
+      </div>
+    </div></body></html>"""
+
+    if not SENDGRID_KEY:
+        return jsonify({"error":"SendGrid not configured","preview":html[:500]}), 400
+
+    payload = {
+        "personalizations": [{"to": [{"email": to_email}]}],
+        "from": {"email": from_email or "security-reports@concentrix.com", "name": sender_name},
+        "subject": f"📊 Weekly Security Advisory Summary — {week_label} ({total} advisories, {len(by_sev['Critical'])} Critical)",
+        "content": [{"type":"text/html","value":html}]
+    }
+    try:
+        resp = requests.post("https://api.sendgrid.com/v3/mail/send",
+            headers={"Authorization":f"Bearer {SENDGRID_KEY}","Content-Type":"application/json"},
+            json=payload, timeout=15)
+        if resp.status_code == 202:
+            return jsonify({"success":True,"total":total,"critical":len(by_sev["Critical"]),"zero_days":len(zero_days)})
+        return jsonify({"error":f"SendGrid HTTP {resp.status_code}","detail":resp.text[:200]}), 500
+    except Exception as e:
+        return jsonify({"error":str(e)}), 500
+
 
 @app.route("/email-digest", methods=["POST"])
 @require_auth
