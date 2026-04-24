@@ -109,26 +109,23 @@ def supa_save_advisory_cache(advisories:list) -> bool:
             r = requests.post(f"{SUPABASE_URL}/rest/v1/advisory_cache", headers=h, json=rows[i:i+100], timeout=20)
             if r.status_code not in (200,201): log.warning(f"[SUPABASE] Cache batch {i//100} failed: {r.status_code}")
             else: saved += len(rows[i:i+100])
-        # Purge items older than 30 days — keeps dashboard fresh
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        # Purge items older than 90 days
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
         requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_cache?fetched_at=lt.{cutoff}", headers=supa_headers(), timeout=10)
-        log.info(f"[SUPABASE] Cache purge: removed entries fetched before {cutoff[:10]}")
         log.info(f"[SUPABASE] Cache saved: {saved}/{len(rows)} items")
         return True
     except Exception as e: log.error(f"[SUPABASE] save_cache: {e}"); return False
 
 def supa_load_advisory_cache() -> list:
-    """Load advisory_cache rows, only items fetched in the last 30 days (keeps feed fresh)."""
+    """Load all rows from advisory_cache in paginated 1000-row chunks (handles 2500+ rows)."""
     if not (SUPABASE_URL and SUPABASE_KEY): return []
     all_items = []
     offset = 0
     chunk = 1000
-    # Only load rows fetched within the last 30 days — prevents old stale advisories appearing
-    cutoff_date = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
     while True:
         try:
             url = (f"{SUPABASE_URL}/rest/v1/advisory_cache"
-                   f"?select=data&fetched_at=gte.{cutoff_date}&order=fetched_at.desc&limit={chunk}&offset={offset}")
+                   f"?select=data&order=fetched_at.desc&limit={chunk}&offset={offset}")
             r = requests.get(url, headers=supa_headers(), timeout=15)
             if r.status_code != 200:
                 log.warning(f"[SUPABASE] load_cache page offset={offset}: HTTP {r.status_code}")
@@ -142,7 +139,7 @@ def supa_load_advisory_cache() -> list:
         except Exception as e:
             log.error(f"[SUPABASE] load_cache page offset={offset}: {e}")
             break
-    log.info(f"[SUPABASE] Cache loaded: {len(all_items)} items (last 30 days only, {offset+chunk} rows scanned)")
+    log.info(f"[SUPABASE] Cache loaded: {len(all_items)} items (paginated, {offset+chunk} rows scanned)")
     return all_items
 
 def supa_get_source_config() -> dict:
@@ -282,97 +279,6 @@ TRUSTED_FEEDS = {
     "schneier":     "https://www.schneier.com/feed/atom/",
     "reddit_netsec":"https://www.reddit.com/r/netsec/.rss",
     "threatpost":   "https://threatpost.com/feed/",
-    # ══ NEWLY ADDED VENDORS (from missing vendor audit Apr 2026) ═════════════
-
-    # OS & PLATFORM — ENTERPRISE
-    "dell_security":       "https://www.dell.com/support/security/rss.xml",
-    "ibm_psirt":           "https://www.ibm.com/blogs/psirt/feed/",
-    "intel_security":      "https://www.intel.com/content/www/us/en/security-center/default.html",
-    "nvidia_security":     "https://www.nvidia.com/object/nvidia-rss.xml",
-    "qualcomm_security":   "https://docs.qualcomm.com/product/publicresources/securitybulletin/rss.xml",
-    "samsung_security":    "https://semiconductor.samsung.com/rss/security/",
-
-    # NETWORK / SECURITY APPLIANCES
-    "huawei_psirt":        "https://www.huawei.com/en/rss-feeds/psirt",
-    "asus_security":       "https://www.asus.com/security-advisory/rss",
-    "tplink_security":     "https://www.tp-link.com/security.xml",
-    "netapp_security":     "https://security.netapp.com/atom.xml",
-    "openvpn_security":    "https://openvpn.net/security-advisories/feed/",
-    "thales_psirt":        "https://www.thalesgroup.com/en/global/group/psirt/feed",
-    "apc_schneider":       "https://www.se.com/ww/en/rss/security-notifications.xml",
-    "zscaler_security":    "https://www.zscaler.com/security-advisories/rss",
-
-    # ENDPOINT / IDENTITY
-    "crowdstrike_edr":     "https://www.crowdstrike.com/security-advisories/feed/",
-    "kaspersky_security":  "https://support.kaspersky.com/rss/vulnerability.rss",
-    "cyberark_security":   "https://www.cyberark.com/product-security/rss",
-    "veritas_security":    "https://www.veritas.com/support/en_US/security.rss",
-    "commvault_security":  "https://documentation.commvault.com/securityadvisories/rss.xml",
-    "yubico_advisories":   "https://www.yubico.com/support/security-advisories/feed/",
-    "symantec_broadcom":   "https://www.broadcom.com/rss/security-advisories.xml",
-    "lexmark_security":    "https://www.lexmark.com/en_us/solutions/security/lexmark-security-advisories/rss.xml",
-    "zebra_security":      "https://www.zebra.com/rss/security-alerts.xml",
-    "ricoh_security":      "https://www.ricoh.com/rss/security-alerts.rss",
-
-    # CLOUD / SaaS
-    "zoom_security":       "https://explore.zoom.us/en/trust/security/security-bulletin/feed/",
-    "salesforce_security": "https://security.salesforce.com/security-advisories.rss",
-    "newrelic_security":   "https://docs.newrelic.com/docs/security/security-privacy/information-security/security-bulletins/rss.xml",
-    "uipath_security":     "https://www.uipath.com/trust-security-advisories.rss",
-    "mongodb_security":    "https://www.mongodb.com/blog/channel/security/rss",
-
-    # BROWSER / MIDDLEWARE / DEV TOOLS
-    "adobe_security":      "https://helpx.adobe.com/security/home.xml",
-    "jenkins_security":    "https://www.jenkins.io/security/advisories/rss.xml",
-    "nodejs_security":     "https://nodejs.org/en/feed/vulnerability.xml",
-    "mariadb_security":    "https://mariadb.com/kb/en/security/rss/",
-    "postgresql_security": "https://www.postgresql.org/news/pgsql-announce/",
-    "libreoffice_security":"https://www.libreoffice.org/news-and-events/rss/",
-    "ruby_security":       "https://www.ruby-lang.org/en/security/feed/",
-    "foxit_security":      "https://www.foxit.com/rss/security-bulletins.rss",
-    "wireshark_security":  "https://www.wireshark.org/news/rss.xml",
-    "jetbrains_security":  "https://www.jetbrains.com/privacy-security/issues-fixed/rss",
-    "teamviewer_security": "https://www.teamviewer.com/en/resources/trust-center/security-bulletins/rss/",
-    "avaya_security":      "https://support.avaya.com/rss/security.xml",
-    "autodesk_security":   "https://www.autodesk.com/trust/security-advisories/rss.xml",
-    "zimbra_security":     "https://wiki.zimbra.com/wiki/Special:RecentChanges&feed=rss",
-    "pgadmin_news":        "https://www.pgadmin.org/rss.xml",
-
-    # ══ BATCH 2 ADDITIONS (url_LIST.xlsx audit Apr 2026) ═════════════════════
-
-    # OS & PLATFORM
-    "lenovo_security":    "https://support.lenovo.com/us/en/product_security/rss",
-    "amd_security":       "https://www.amd.com/en/resources/product-security.html/rss",
-    "hp_security":        "https://support.hp.com/wps/mss/rss/en_US/security-bulletins",
-    "acer_security":      "https://community.acer.com/en/kb/categories/1623-security-vulnerabilities/feed",
-
-    # NETWORK
-    "arista_security":    "https://www.arista.com/en/support/advisories-notices/security-advisory/rss",
-    "mitel_security":     "https://www.mitel.com/support/security-advisories/rss",
-    "forcepoint_security":"https://support.forcepoint.com/rss/security-advisories",
-
-    # CLOUD
-    "nutanix_security":   "https://portal.nutanix.com/page/documents/security-advisories/list/rss",
-
-    # ENDPOINT
-    "beyondtrust_security":"https://www.beyondtrust.com/rss/security-advisories",
-    "brother_security":   "https://support.brother.com/g/s/security/rss/en/",
-    "marvell_security":   "https://www.marvell.com/rss/security-advisories.xml",
-
-    # BROWSER / MIDDLEWARE
-    "sap_security":       "https://www.sap.com/rss/content/whatsnew.xml",
-    "devolutions_security":"https://devolutions.net/security/advisories/rss",
-
-    # GOVERNMENT
-    "cccs_alerts":        "https://www.cyber.gc.ca/api/en/alerts-advisories/feed/rss",
-
-    # THREAT INTEL
-    "qualys_blog":        "https://blog.qualys.com/feed",
-
-    # NEWS
-    "cybersecnews":       "https://cybersecuritynews.com/feed/",
-    "gbhackers":          "https://gbhackers.com/feed/",
-    "cyberinsider":       "https://cyberinsider.com/feed/",
 }
 
 SOURCE_COUNT = len(TRUSTED_FEEDS)
@@ -384,19 +290,6 @@ OEM_TIER1 = {
     "redhat","android","oracle","splunk","veeam","cisa_kev","cisa_alerts","cisa_ics",
     "ncsc_uk","cert_eu","cert_in","zdi_published","mozilla","openssl","cortex_xdr",
     "netskope","forescout","aws","gcp","msrc_blog","trellix",
-    # Newly added OEM Tier 1
-    "dell_security","ibm_psirt","intel_security","nvidia_security","huawei_psirt",
-    "asus_security","tplink_security","netapp_security","openvpn_security","thales_psirt",
-    "apc_schneider","zscaler_security","kaspersky_security","cyberark_security",
-    "veritas_security","commvault_security","yubico_advisories","symantec_broadcom",
-    "lexmark_security","zoom_security","salesforce_security","adobe_security",
-    "jenkins_security","nodejs_security","mariadb_security","postgresql_security",
-    "ruby_security","foxit_security","teamviewer_security","avaya_security",
-    "autodesk_security","qualcomm_security","newrelic_security",
-    # Batch 2
-    "lenovo_security","amd_security","hp_security","arista_security",
-    "mitel_security","forcepoint_security","nutanix_security","beyondtrust_security",
-    "marvell_security","sap_security","cccs_alerts",
 }
 
 # ─── STARTUP LOG ──────────────────────────────────────────────────────────────
@@ -408,52 +301,197 @@ log.info(f"   Teams     : {'✅ Webhook set' if TEAMS_WEBHOOK else '⚠️  No w
 log.info(f"   Supabase  : {'✅ Persistent storage' if SUPABASE_URL else '⚠️  Memory only'}")
 
 # ─── HELPERS ──────────────────────────────────────────────────────────────────
+
+# News/blog sources — these are articles, not structured advisories
+NEWS_SOURCES = {
+    "krebs","bleeping","hackernews","secweek","darkread","helpnet",
+    "ars_security","reddit_netsec","threatpost","schneier","cybersecnews",
+    "gbhackers","cyberinsider","qualys_blog","sans_isc","mandiant",
+    "talos","unit42","msft_ti","secureworks","recorded_future",
+}
+
 SEVERITY_KEYWORDS = {
-    "Critical":["critical","cvss 9","cvss 10","remote code execution","rce","zero-day","actively exploited","unauthenticated"],
-    "High":    ["high","cvss 7","cvss 8","privilege escalation","authentication bypass","zero day"],
-    "Medium":  ["medium","moderate","cvss 5","cvss 6","denial of service","information disclosure"],
-    "Low":     ["low","cvss 1","cvss 2","cvss 3","cvss 4"],
+    "Critical":["critical","cvss 9","cvss 10","remote code execution","rce",
+                "zero-day","actively exploited","unauthenticated","pre-auth",
+                "authentication bypass","arbitrary code","arbitrary command"],
+    "High":    ["high","cvss 7","cvss 8","privilege escalation","zero day",
+                "sql injection","xxe","ssrf","path traversal","deserialization"],
+    "Medium":  ["medium","moderate","cvss 5","cvss 6","denial of service",
+                "dos","information disclosure","xss","csrf","open redirect"],
+    "Low":     ["low","cvss 1","cvss 2","cvss 3","cvss 4","minor","low severity"],
 }
 
 def parse_severity(text:str) -> str:
+    # First try CVSS score directly — most reliable
+    score = extract_cvss_v3(text)
+    if score is not None:
+        if score >= 9.0: return "Critical"
+        if score >= 7.0: return "High"
+        if score >= 4.0: return "Medium"
+        return "Low"
+    # Fall back to keyword matching
     t = text.lower()
     for sev, kws in SEVERITY_KEYWORDS.items():
         if any(k in t for k in kws): return sev
     return "Unknown"
 
 def extract_cvss_v3(text:str):
-    m = re.search(r"CVSSv?3[.\s:]*([0-9]\.[0-9])", text, re.IGNORECASE)
-    if m: return float(m.group(1))
-    m = re.search(r"cvss[\s:v0-9]*([0-9]\.[0-9])", text, re.IGNORECASE)
-    return float(m.group(1)) if m else None
+    # CVSSv3.x explicit
+    m = re.search(r"CVSS\s*v?3[.\d]*\s*[:\-]?\s*([0-9](?:\.[0-9]+)?)", text, re.IGNORECASE)
+    if m:
+        try: return round(float(m.group(1)),1)
+        except: pass
+    # Base Score pattern (common in NVD/MSRC feeds)
+    m = re.search(r"Base\s+Score[:\s]+([0-9](?:\.[0-9]+)?)", text, re.IGNORECASE)
+    if m:
+        try: return round(float(m.group(1)),1)
+        except: pass
+    # Generic CVSS score
+    m = re.search(r"CVSS\s*[:\s=]+([0-9](?:\.[0-9]+)?)", text, re.IGNORECASE)
+    if m:
+        try:
+            v = round(float(m.group(1)),1)
+            if 0.0 <= v <= 10.0: return v
+        except: pass
+    return None
 
 def parse_cvss(text:str): return extract_cvss_v3(text)
 
 def is_zero_day(text:str) -> bool:
-    return bool(re.search(r"zero.?day|0.?day|actively exploit|in the wild|exploited in", text, re.IGNORECASE))
+    return bool(re.search(
+        r"zero.?day|0.?day|actively exploit|in the wild|exploited in|"
+        r"wild exploit|known exploit|weaponized|exploited in attacks",
+        text, re.IGNORECASE))
 
 def extract_cve(text:str):
     m = re.search(r"CVE-\d{4}-\d{4,7}", text, re.IGNORECASE)
     return m.group(0).upper() if m else None
 
 def extract_all_cves(text:str) -> list:
-    return list(dict.fromkeys(re.findall(r"CVE-\d{4}-\d{4,7}", text, re.IGNORECASE)))
+    return list(dict.fromkeys(
+        c.upper() for c in re.findall(r"CVE-\d{4}-\d{4,7}", text, re.IGNORECASE)
+    ))
 
 def clean_html(text:str) -> str:
-    return re.sub(r"<[^>]+>"," ", text or "").strip()
+    """Remove HTML tags and clean whitespace."""
+    text = re.sub(r"<br\s*/?>", " | ", text or "", flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"&amp;", "&", text)
+    text = re.sub(r"&lt;",  "<", text)
+    text = re.sub(r"&gt;",  ">", text)
+    text = re.sub(r"&nbsp;", " ", text)
+    text = re.sub(r"&#\d+;", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+def extract_title_from_url(url:str) -> str:
+    """Turn a URL path into a readable title as last resort."""
+    try:
+        path = re.sub(r"https?://[^/]+/", "", url)
+        path = re.sub(r"\.\w{2,4}$", "", path)
+        path = path.split("?")[0].split("#")[0]
+        slug = path.split("/")[-1] or path.split("/")[-2]
+        return slug.replace("-", " ").replace("_", " ").title()[:150]
+    except:
+        return url[:150]
 
 def extract_products(entry) -> list:
     products = []
+    # From RSS tags/categories
     for t in (getattr(entry,"tags",[]) or []):
-        v = t.get("term") or t.get("label") or ""
-        if v and len(v) < 60 and v not in products: products.append(v)
-    cat = getattr(entry,"category","")
-    if cat and cat not in products and len(cat) < 60: products.append(cat)
+        v = (t.get("term") or t.get("label") or "").strip()
+        if v and 2 < len(v) < 60 and v.lower() not in ("security","advisory","update","patch") and v not in products:
+            products.append(v)
+    cat = (getattr(entry,"category","") or "").strip()
+    if cat and cat not in products and 2 < len(cat) < 60:
+        products.append(cat)
     return products[:8]
 
+def extract_products_from_text(text:str) -> list:
+    """Extract software/product names from advisory text using common patterns."""
+    products = []
+    # "affects X versions Y through Z"
+    for m in re.finditer(
+        r"(?:affects?|affected|impacts?|impacted|vulnerable|in)\s+"
+        r"([A-Z][A-Za-z0-9\s\/\-]{2,40}?)"
+        r"(?:\s+version|\s+v\d|[\s,\.;])",
+        text, re.IGNORECASE):
+        p = m.group(1).strip()
+        if p and len(p) > 3 and p not in products:
+            products.append(p[:50])
+    # "Product X Y.Z through Y.Z"
+    for m in re.finditer(
+        r"([A-Z][A-Za-z0-9\s]{2,30}?)\s+(?:version|v)[\s]*([\d\.]+)",
+        text, re.IGNORECASE):
+        p = m.group(1).strip()
+        if p and p not in products:
+            products.append(p[:50])
+    return products[:6]
+
+def extract_patch_info(text:str) -> str:
+    """Extract solution/patch/remediation sentence from advisory text."""
+    patterns = [
+        r"(?:solution|patch|fix|remediation|mitigation|workaround|required action|recommended action|apply|update to)[:\s]+([^\|]{20,400})",
+        r"(?:users? (?:should|must|are advised to|are recommended to))\s+([^\|]{20,300})",
+        r"(?:upgrade|update)\s+to\s+([^\|]{10,200})",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, re.IGNORECASE | re.DOTALL)
+        if m:
+            result = re.sub(r'\s+', ' ', m.group(1)).strip()
+            if len(result) > 15:
+                return result[:300]
+    return ""
+
+def extract_affected_versions(text:str) -> list:
+    """Extract version ranges from advisory text."""
+    versions = []
+    for m in re.finditer(
+        r"(?:versions?|v)[\s]*([\d\.]+(?:\s*(?:through|to|and earlier|and below|before|prior to)\s*[\d\.]+)?)",
+        text, re.IGNORECASE):
+        v = m.group(0).strip()
+        if v not in versions: versions.append(v[:40])
+    return versions[:4]
+
+def extract_bug_id(entry, source:str) -> str:
+    """Extract advisory/bug number from entry ID, title, or link."""
+    patterns = [
+        r"(CVE-\d{4}-\d{4,7})",
+        r"(GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4})",
+        r"(FG-IR-\d{2}-\d+)",
+        r"(cisco-sa-[a-zA-Z0-9\-]+)",
+        r"(MSRC-[A-Z0-9\-]+)",
+        r"(ADV\d{6})",
+        r"(SA\d{4,8})",
+        r"(VMSA-\d{4}-\d{4})",
+        r"(JSA\d+)",
+        r"(HPSB[A-Z0-9]+)",
+        r"(VU#\d+)",
+        r"(KB\d{6,8})",
+    ]
+    combined = f"{getattr(entry,'id','')} {getattr(entry,'title','')} {getattr(entry,'link','')}"
+    for pat in patterns:
+        m = re.search(pat, combined, re.IGNORECASE)
+        if m: return m.group(1).upper()
+    return ""
+
 def extract_author(entry) -> str:
-    a = getattr(entry,"author","") or getattr(entry,"author_detail",{}).get("name","") or ""
-    return a[:80]
+    a = (getattr(entry,"author","") or
+         getattr(entry,"author_detail",{}).get("name","") or
+         getattr(entry,"dc_creator","") or "")
+    return a.strip()[:80]
+
+def data_quality(advisory:dict) -> str:
+    """Rate advisory data completeness: rich | partial | thin"""
+    score = 0
+    if advisory.get("cve") or advisory.get("cves"): score += 3
+    if advisory.get("cvss"):                         score += 2
+    if advisory.get("description","") and len(advisory.get("description","")) > 80: score += 2
+    if advisory.get("products"):                     score += 1
+    if advisory.get("severity","Unknown") != "Unknown": score += 1
+    if advisory.get("patch_info"):                   score += 1
+    if score >= 7: return "rich"
+    if score >= 3: return "partial"
+    return "thin"
 
 def dedupe(advisories:list) -> list:
     """
@@ -492,13 +530,30 @@ def fmt_ts(dt_str:str) -> str:
     return dt_str or datetime.now(timezone.utc).isoformat()
 
 def normalise_entry(entry, source:str) -> dict:
-    title   = clean_html(getattr(entry,"title","") or "")
-    link    = getattr(entry,"link","") or getattr(entry,"id","") or ""
+    # ── Raw field extraction ──────────────────────────────────────────────
+    title_raw = clean_html(getattr(entry,"title","") or "")
+    link      = getattr(entry,"link","") or getattr(entry,"id","") or ""
+
     raw_sum = (getattr(entry,"summary","") or getattr(entry,"description","") or
                (getattr(entry,"content",[{}])[0].get("value","") if hasattr(entry,"content") and entry.content else ""))
-    summary = clean_html(raw_sum)[:600]
-    full    = clean_html(getattr(entry,"content",[{}])[0].get("value","") if hasattr(entry,"content") and entry.content else "")[:1500] or summary
+    summary = clean_html(raw_sum)[:800]
+    full    = clean_html(
+        getattr(entry,"content",[{}])[0].get("value","")
+        if hasattr(entry,"content") and entry.content else ""
+    )[:2000] or summary
 
+    # ── Title cleaning: if title IS a URL, replace with readable slug ──
+    is_url_title = bool(re.match(r"https?://", title_raw.strip()))
+    if is_url_title and summary:
+        # Use first sentence of summary as the title
+        first_sent = re.split(r"[.!?]", summary)[0].strip()
+        title = first_sent[:200] if len(first_sent) > 15 else extract_title_from_url(link)
+    elif is_url_title:
+        title = extract_title_from_url(link)
+    else:
+        title = title_raw[:200]
+
+    # ── Published date ────────────────────────────────────────────────────
     published = ""
     for attr in ["published_parsed","updated_parsed"]:
         val = getattr(entry, attr, None)
@@ -507,35 +562,66 @@ def normalise_entry(entry, source:str) -> dict:
             except: pass
     if not published: published = datetime.now(timezone.utc).isoformat()
 
-    combined = f"{title} {summary} {full}"
-    all_cves = extract_all_cves(combined)
+    # ── Updated/Review date ───────────────────────────────────────────────
+    updated = ""
+    val = getattr(entry, "updated_parsed", None)
+    if val:
+        try: updated = datetime(*val[:6], tzinfo=timezone.utc).isoformat()
+        except: pass
+
+    # ── Enriched extraction ───────────────────────────────────────────────
+    combined  = f"{title} {summary} {full}"
+    all_cves  = extract_all_cves(combined)
+
+    # Products: RSS tags first, then text mining
     products = extract_products(entry)
+    if not products:
+        products = extract_products_from_text(combined)
     if not products:
         m = re.search(r"(?:product|affects?|affected)[:\s]+([^\n.]{3,80})", summary, re.IGNORECASE)
         if m: products = [m.group(1).strip()[:60]]
 
-    is_oem = source in OEM_TIER1
+    # Patch/solution info extraction
+    patch_info = extract_patch_info(combined)
 
-    return {
-        "id":          link or title,
-        "title":       title[:200],
-        "summary":     summary,
-        "description": full,
-        "link":        link,
-        "url":         link,
-        "published":   published,
-        "severity":    parse_severity(combined),
-        "cvss":        extract_cvss_v3(combined),
-        "cve":         all_cves[0] if all_cves else None,
-        "cves":        all_cves[:10],
-        "zeroDay":     is_zero_day(combined),
-        "source":      source,
-        "vendor":      source,
-        "products":    products,
-        "author":      extract_author(entry),
-        "tags":        [t.get("term","") for t in (getattr(entry,"tags",[]) or []) if t.get("term")][:6],
-        "isOEM":       is_oem,
+    # Affected versions extraction
+    affected_versions = extract_affected_versions(combined)
+
+    # Bug/advisory ID extraction
+    bug_id = extract_bug_id(entry, source)
+
+    is_oem     = source in OEM_TIER1
+    is_news    = source in NEWS_SOURCES
+    cvss_score = extract_cvss_v3(combined)
+    severity   = parse_severity(combined)
+
+    advisory = {
+        "id":               all_cves[0] if all_cves else (link or title_raw),
+        "title":            title,
+        "summary":          summary,
+        "description":      full,
+        "link":             link,
+        "url":              link,
+        "published":        published,
+        "updated":          updated,
+        "severity":         severity,
+        "cvss":             cvss_score,
+        "cve":              all_cves[0] if all_cves else None,
+        "cves":             all_cves[:10],
+        "zeroDay":          is_zero_day(combined),
+        "source":           source,
+        "vendor":           source,
+        "products":         products,
+        "affected_versions":affected_versions,
+        "patch_info":       patch_info,
+        "bug_id":           bug_id,
+        "author":           extract_author(entry),
+        "tags":             [t.get("term","") for t in (getattr(entry,"tags",[]) or []) if t.get("term")][:6],
+        "isOEM":            is_oem,
+        "isNews":           is_news,
     }
+    advisory["data_quality"] = data_quality(advisory)
+    return advisory
 
 # ─── FETCH ────────────────────────────────────────────────────────────────────
 def fetch_rss(key:str, url:str) -> list:
@@ -686,21 +772,10 @@ def advisories():
                     "advisories":cached[:2500],"source":"cache"})
         # Live fetch
         all_adv = fetch_all_advisories()
-        # Filter to last 30 days published — prevents historically old RSS items from surfacing
-        cutoff_30d = datetime.now(timezone.utc) - timedelta(days=30)
-        recent_adv = []
-        for a in all_adv:
-            try:
-                pub = datetime.fromisoformat(a.get("published","").replace("Z","+00:00"))
-                if pub >= cutoff_30d:
-                    recent_adv.append(a)
-            except Exception:
-                recent_adv.append(a)  # keep items with unparseable dates
-        log.info(f"[ADVISORIES] Live: {len(all_adv)} total, {len(recent_adv)} within 30 days")
-        if SUPABASE_URL and recent_adv:
-            threading.Thread(target=supa_save_advisory_cache, args=(recent_adv,), daemon=True).start()
-        return jsonify({"total":len(recent_adv),"generated":datetime.now(timezone.utc).isoformat(),
-            "advisories":recent_adv[:2500],"source":"live"})
+        if SUPABASE_URL and all_adv:
+            threading.Thread(target=supa_save_advisory_cache, args=(all_adv,), daemon=True).start()
+        return jsonify({"total":len(all_adv),"generated":datetime.now(timezone.utc).isoformat(),
+            "advisories":all_adv[:2500],"source":"live"})
     except Exception as e:
         log.error(f"[ADVISORIES] {e}")
         return jsonify({"error":"Failed to fetch advisories"}), 500
