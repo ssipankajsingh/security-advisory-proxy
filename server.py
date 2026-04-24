@@ -36,6 +36,7 @@ DIGEST_EMAIL     = os.getenv("DIGEST_EMAIL","")
 PORT             = int(os.getenv("PORT",3001))
 SUPABASE_URL     = os.getenv("SUPABASE_URL","").rstrip("/")
 SUPABASE_KEY     = os.getenv("SUPABASE_KEY","")
+FETCH_WINDOW_DAYS = 30   # Drop feed items older than this many days at ingest
 
 # ─── CACHE ────────────────────────────────────────────────────────────────────
 cache      = TTLCache(maxsize=200, ttl=3600)
@@ -547,6 +548,17 @@ def fmt_ts(dt_str:str) -> str:
     """Return ISO timestamp string."""
     return dt_str or datetime.now(timezone.utc).isoformat()
 
+def is_within_window(published_str: str) -> bool:
+    """Return True if published date is within FETCH_WINDOW_DAYS of now."""
+    try:
+        pub = datetime.fromisoformat(published_str.replace("Z", "+00:00"))
+        if pub.tzinfo is None:
+            pub = pub.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - pub).days <= FETCH_WINDOW_DAYS
+    except Exception:
+        return True  # If we can't parse, keep the item
+
+
 def normalise_entry(entry, source:str) -> dict:
     # ── Raw field extraction ──────────────────────────────────────────────
     title_raw = clean_html(getattr(entry,"title","") or "")
@@ -579,6 +591,10 @@ def normalise_entry(entry, source:str) -> dict:
             try: published = datetime(*val[:6], tzinfo=timezone.utc).isoformat(); break
             except: pass
     if not published: published = datetime.now(timezone.utc).isoformat()
+
+    # ── Drop items outside the fetch window ──────────────────────────────────
+    if not is_within_window(published):
+        return None
 
     # ── Updated/Review date ───────────────────────────────────────────────
     updated = ""
@@ -654,7 +670,7 @@ def fetch_rss(key:str, url:str) -> list:
         }, allow_redirects=True)
         resp.raise_for_status()
         feed  = feedparser.parse(resp.content)
-        items = [normalise_entry(e, key) for e in (feed.entries or [])[:50]]
+        items = [x for x in [normalise_entry(e, key) for e in (feed.entries or [])[:50]] if x is not None]
         if feed.bozo and not items: log.warning(f"[{key}] Bozo: {feed.bozo_exception}")
         elif items: log.info(f"[{key}] ✅ {len(items)} items")
         with cache_lock: cache[key] = items
@@ -663,7 +679,7 @@ def fetch_rss(key:str, url:str) -> list:
         try:
             resp  = requests.get(url, timeout=15, verify=False, headers={"User-Agent":"SecurityAdvisoryBot/2.0"})
             feed  = feedparser.parse(resp.content)
-            items = [normalise_entry(e, key) for e in (feed.entries or [])[:50]]
+            items = [x for x in [normalise_entry(e, key) for e in (feed.entries or [])[:50]] if x is not None]
             log.warning(f"[{key}] SSL bypass — {len(items)} items")
             with cache_lock: cache[key] = items
             return items
@@ -691,6 +707,7 @@ def fetch_mozilla_json() -> list:
                 "zeroDay":is_zero_day(combined),"source":"mozilla","vendor":"Mozilla","url":link,
                 "products":[],"author":"","tags":[],"isOEM":True,
                 "fetched_at":datetime.now(timezone.utc).isoformat()})
+        items = [i for i in items if is_within_window(i.get("published",""))]
         with cache_lock: cache["mozilla"] = items
         log.info(f"[mozilla] ✅ {len(items)} items (JSON)")
         return items
@@ -715,6 +732,7 @@ def fetch_cisa_kev() -> list:
                 "severity":"Critical","cvss":None,"cve":cve_id,"cves":[cve_id],"zeroDay":True,
                 "source":"CISA KEV","vendor":"CISA","products":[v.get("product","")],"author":"","tags":["KEV"],"isOEM":True,
                 "fetched_at":datetime.now(timezone.utc).isoformat()})
+        items = [i for i in items if is_within_window(i.get("published",""))]
         with cache_lock: cache["cisa_kev"] = items
         log.info(f"[cisa_kev] ✅ {len(items)} items")
         return items
