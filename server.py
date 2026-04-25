@@ -803,15 +803,17 @@ def normalise_entry(entry, source:str) -> dict:
     is_news      = source in NEWS_SOURCES
     is_zero_src  = source in ZERO_DAY_SOURCES
     # Detect blog/analysis articles mixed into advisory feeds (e.g. CrowdStrike Patch Tuesday posts)
+    # Title-based news detection — only for non-OEM sources
+    # OEM Tier 1 sources (msrc, cisco, fortinet etc.) NEVER flagged as news by title
+    # Keywords are specific enough to catch blog posts but not CVE advisory titles
     BLOG_TITLE_KEYWORDS = [
         "patch tuesday","threat intelligence","threat report","threat roundup",
-        "analysis","weekly","monthly","recap","roundup","summary","overview",
-        "blog","podcast","webinar","report","interview","whitepaper","research",
+        "weekly","monthly","recap","roundup","podcast","webinar","interview","whitepaper",
     ]
     title_lower = title.lower()
     is_news_by_title = any(kw in title_lower for kw in BLOG_TITLE_KEYWORDS)
-    # If source is not a known news source but the title looks like an article, mark as news
-    if not is_news and is_news_by_title and not (all_cves and len(all_cves) == 1):
+    # Only apply title-based detection if: not already news, not OEM, not a single CVE item
+    if not is_news and not is_oem and is_news_by_title and not (all_cves and len(all_cves) >= 1):
         is_news = True
     cvss_score   = extract_cvss_v3(combined)
     severity_raw = parse_severity(combined, source=source, is_oem=is_oem)
