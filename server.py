@@ -313,10 +313,21 @@ ZERO_DAY_SOURCES = {
 
 # News/blog sources — these are articles, not structured advisories
 NEWS_SOURCES = {
+    # General security news sites
     "krebs","bleeping","hackernews","secweek","darkread","helpnet",
     "ars_security","reddit_netsec","threatpost","schneier","cybersecnews",
-    "gbhackers","cyberinsider","qualys_blog","sans_isc","mandiant",
-    "talos","unit42","msft_ti","secureworks","recorded_future",
+    "gbhackers","cyberinsider","qualys_blog","sans_isc",
+    # Threat intelligence & research blogs (articles, not structured advisories)
+    "mandiant","talos","unit42","msft_ti","secureworks","recorded_future",
+    "crowdstrike_blog",   # CrowdStrike blog (Patch Tuesday analysis etc.)
+    "msrc_blog",          # MSRC blog posts (msrc feed = structured advisories, kept separate)
+    "sentinelone",        # SentinelLabs threat research
+    "malwarebytes",       # Malwarebytes Labs research
+    "eset",               # ESET threat research
+    "project_zero",       # Google Project Zero research
+    "cloudflare",         # Cloudflare security blog
+    "proofpoint",         # Proofpoint threat intel blog
+    "certeu_threat_intel",# CERT-EU threat intelligence reports
 }
 
 SEVERITY_KEYWORDS = {
