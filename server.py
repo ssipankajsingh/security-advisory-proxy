@@ -38,6 +38,7 @@ SUPABASE_URL     = os.getenv("SUPABASE_URL","").rstrip("/")
 SUPABASE_KEY     = os.getenv("SUPABASE_KEY","")
 FETCH_WINDOW_DAYS = 30   # Drop feed items older than this many days at ingest
 CRON_SECRET       = os.getenv("CRON_SECRET", "")   # Secret token for /fetch-now endpoint
+VULNCHECK_API_KEY = os.getenv("VULNCHECK_API_KEY","")  # VulnCheck Community API key (free at vulncheck.com/community)
 
 # ─── CACHE ────────────────────────────────────────────────────────────────────
 cache      = TTLCache(maxsize=200, ttl=3600)
@@ -183,6 +184,8 @@ TRUSTED_FEEDS = {
     "ghsa":                  "__GHSA_API__",       # GitHub Advisory Database API
     "osv":                   "__OSV_API__",        # Google OSV.dev API
     "mitre_cve":             "__MITRE_CVE_API__",  # MITRE CVE List (cvelistV5)
+    "vulncheck_nvd":         "__VULNCHECK_API__",  # VulnCheck NVD++ — faster + richer than NIST NVD
+    "vulncheck_kev":         "__VULNCHECK_KEV__",  # VulnCheck KEV — superset of CISA KEV + exploit intel
 
     # ══ GOVERNMENT & CERT ════════════════════════════════════════════════════
     "cisa_alerts":       "https://www.cisa.gov/cybersecurity-advisories/all.xml",
@@ -289,12 +292,13 @@ OEM_TIER1 = {
     "redhat","android","oracle","splunk","veeam","cisa_kev","cisa_alerts","cisa_ics",
     "ncsc_uk","cert_eu","cert_in","zdi_published","mozilla","openssl",
     "netskope","forescout","aws","gcp","msrc_blog","trellix",
-    "ghsa","mitre_cve",  # Pre-NVD sources treated as authoritative
+    "ghsa","mitre_cve","vulncheck_nvd","vulncheck_kev",  # Pre-NVD sources treated as authoritative
 }
 
 # ─── STARTUP LOG ──────────────────────────────────────────────────────────────
 log.info(f"🛡️  Security Advisory Proxy v2 — port {PORT}")
-log.info(f"   Sources   : {SOURCE_COUNT} configured (+ GHSA/OSV/MITRE pre-NVD)")
+log.info(f"   Sources   : {SOURCE_COUNT} configured (+ GHSA/OSV/MITRE/VulnCheck pre-NVD)")
+log.info(f"   VulnCheck : {'✅ API key set' if VULNCHECK_API_KEY else '⚠️  No API key (set VULNCHECK_API_KEY for pre-NVD data)'}")
 log.info(f"   Email     : {'✅ SendGrid' if SENDGRID_API_KEY else '⚠️  No SendGrid'}")
 log.info(f"   Auth      : {'✅ Access code set' if ACCESS_CODE else '⚠️  No access code'}")
 log.info(f"   Teams     : {'✅ Webhook set' if TEAMS_WEBHOOK else '⚠️  No webhook'}")
@@ -1071,15 +1075,281 @@ def fetch_mitre_cve() -> list:
         return []
 
 
+def fetch_vulncheck_nvd() -> list:
+    """
+    VulnCheck NVD++ — reliable, high-performance NVD replacement.
+    Publishes CVEs 24–72h BEFORE NIST NVD enriches them.
+    Includes exploit intel, VulnCheck CPE, ransomware campaign flags.
+    Requires free API key: https://vulncheck.com/community
+    """
+    if not VULNCHECK_API_KEY:
+        log.debug("[vulncheck_nvd] No API key set — skipping (set VULNCHECK_API_KEY env var)")
+        return []
+    with cache_lock:
+        if "vulncheck_nvd" in cache: return cache["vulncheck_nvd"]
+    try:
+        since = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%S")
+        resp = requests.get(
+            "https://api.vulncheck.com/v3/index/vulncheck-nvd2",
+            params={"pubStartDate": since, "resultsPerPage": 100},
+            headers={
+                "Authorization": f"Bearer {VULNCHECK_API_KEY}",
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            },
+            timeout=20
+        )
+        resp.raise_for_status()
+        items = []
+        for vuln in (resp.json().get("data") or [])[:100]:
+            cve_id = vuln.get("id","")
+            if not cve_id: continue
+
+            # Parse descriptions
+            descs  = vuln.get("descriptions",[])
+            desc   = next((d.get("value","") for d in descs if d.get("lang","").startswith("en")),"")
+            title  = f"{cve_id}" + (f" — {desc[:120]}" if desc else "")
+
+            # Parse CVSS (VulnCheck NVD++ has v3.1 + v4.0)
+            cvss_val = None; severity = "Unknown"
+            for metric_key in ["cvssMetricV31","cvssMetricV40","cvssMetricV30"]:
+                metrics = vuln.get("metrics",{}).get(metric_key,[])
+                if metrics:
+                    score = metrics[0].get("cvssData",{}).get("baseScore")
+                    if score:
+                        cvss_val = float(score)
+                        sev = metrics[0].get("cvssData",{}).get("baseSeverity","")
+                        severity = sev.capitalize() if sev else parse_severity(desc)
+                        break
+
+            published = vuln.get("published","") or datetime.now(timezone.utc).isoformat()
+            if not is_within_window(published): continue
+
+            # VulnCheck-specific exploit intelligence fields
+            xdb_entries  = vuln.get("vulncheck_xdb",[])          # exploit PoC repos
+            reported_exp = vuln.get("vulncheck_reported_exploitation",[])  # confirmed exploitation
+            kev_data     = vuln.get("vulncheck_kev",{})
+            ransomware   = kev_data.get("knownRansomwareCampaignUse","Unknown")
+            is_exploited = bool(reported_exp) or bool(xdb_entries)
+            exploit_refs = [x.get("xdb_url","") for x in xdb_entries[:3]]
+
+            # CPE affected products from vcVulnerableCPEs (VulnCheck enriched)
+            cpes = vuln.get("vcVulnerableCPEs",[]) or vuln.get("configurations",[])
+            products = list({c.split(":")[4] for c in cpes if isinstance(c,str) and c.startswith("cpe:")})[:5]
+
+            link = f"https://nvd.nist.gov/vuln/detail/{cve_id}"
+            combined = f"{title} {desc}"
+
+            items.append({
+                "id":            cve_id,
+                "title":         title[:300],
+                "summary":       desc[:600],
+                "description":   desc,
+                "link":          link,
+                "url":           link,
+                "published":     published,
+                "severity":      severity or parse_severity(combined),
+                "cvss":          cvss_val,
+                "cve":           cve_id,
+                "cves":          [cve_id],
+                "zeroDay":       is_exploited or is_zero_day(combined),
+                "source":        "vulncheck_nvd",
+                "vendor":        "VulnCheck NVD++",
+                "products":      products,
+                "author":        "",
+                "tags":          (["ransomware"] if ransomware=="Known" else []) + (["exploit-available"] if xdb_entries else []),
+                "isOEM":         True,   # Treated as authoritative
+                "isNews":        False,
+                "fetched_at":    datetime.now(timezone.utc).isoformat(),
+                "patch_status":  _infer_patch_status(combined),
+                "kev_due_date":  kev_data.get("dueDate",""),
+                "required_action": kev_data.get("requiredAction",""),
+                "kev_notes":     f"Ransomware: {ransomware}" + (f" | Exploits: {len(xdb_entries)}" if xdb_entries else ""),
+                "exploit_refs":  exploit_refs,
+                "data_quality":  "RICH" if (desc and cvss_val) else "PARTIAL",
+            })
+
+        with cache_lock: cache["vulncheck_nvd"] = items
+        log.info(f"[vulncheck_nvd] ✅ {len(items)} items (VulnCheck NVD++)")
+        return items
+    except Exception as e:
+        log.error(f"[vulncheck_nvd] Failed: {e}")
+        return []
+
+
+def fetch_vulncheck_kev() -> list:
+    """
+    VulnCheck KEV — superset of CISA KEV with exploit intelligence.
+    Includes: known ransomware campaigns, exploit PoC links, exploitation reports.
+    All items are confirmed exploited in the wild.
+    Requires same free API key as vulncheck_nvd.
+    """
+    if not VULNCHECK_API_KEY:
+        log.debug("[vulncheck_kev] No API key set — skipping")
+        return []
+    with cache_lock:
+        if "vulncheck_kev" in cache: return cache["vulncheck_kev"]
+    try:
+        resp = requests.get(
+            "https://api.vulncheck.com/v3/index/vulncheck-kev",
+            params={"sort": "dateAdded:desc", "limit": 100},
+            headers={
+                "Authorization": f"Bearer {VULNCHECK_API_KEY}",
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            },
+            timeout=20
+        )
+        resp.raise_for_status()
+        items = []
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for v in (resp.json().get("data") or [])[:100]:
+            cve_ids = v.get("cve",[])
+            cve_id  = cve_ids[0] if cve_ids else ""
+            if not cve_id: continue
+            title      = f"{cve_id} — {v.get('vulnerabilityName','')}"
+            summary    = (f"{v.get('shortDescription','')} | Vendor: {v.get('vendorProject','')} | "
+                         f"Product: {v.get('product','')} | Action: {v.get('required_action','')}")
+            published  = v.get("dateAdded", now_iso)
+            if not is_within_window(published): continue
+
+            ransomware = v.get("knownRansomwareCampaignUse","Unknown")
+            xdb        = v.get("vulncheck_xdb",[])
+            reported   = v.get("vulncheck_reported_exploitation",[])
+            due_date   = v.get("dueDate","")
+
+            items.append({
+                "id":            cve_id,
+                "title":         title[:300],
+                "summary":       summary[:600],
+                "description":   summary,
+                "link":          f"https://nvd.nist.gov/vuln/detail/{cve_id}",
+                "url":           f"https://nvd.nist.gov/vuln/detail/{cve_id}",
+                "published":     published,
+                "severity":      "Critical",
+                "cvss":          None,
+                "cve":           cve_id,
+                "cves":          cve_ids,
+                "zeroDay":       True,
+                "source":        "vulncheck_kev",
+                "vendor":        "VulnCheck KEV",
+                "products":      [v.get("product","")],
+                "author":        "",
+                "tags":          ["KEV","vulncheck"] + (["ransomware"] if ransomware=="Known" else []),
+                "isOEM":         True,
+                "isNews":        False,
+                "fetched_at":    now_iso,
+                "patch_status":  "available" if v.get("required_action","") else "unknown",
+                "kev_due_date":  due_date,
+                "required_action": v.get("required_action",""),
+                "kev_notes":     (f"Ransomware: {ransomware}" +
+                                  (f" | {len(xdb)} exploit PoC(s)" if xdb else "") +
+                                  (f" | {len(reported)} exploitation report(s)" if reported else "")),
+                "exploit_refs":  [x.get("xdb_url","") for x in xdb[:3]],
+                "data_quality":  "RICH",
+            })
+
+        with cache_lock: cache["vulncheck_kev"] = items
+        log.info(f"[vulncheck_kev] ✅ {len(items)} items (VulnCheck KEV)")
+        return items
+    except Exception as e:
+        log.error(f"[vulncheck_kev] Failed: {e}")
+        return []
+
+
+def enrich_with_vulncheck(advisories: list) -> list:
+    """
+    Backfill enrichment: for CVEs already in the feed that are missing CVSS,
+    exploit data, or ransomware flags — query VulnCheck to fill the gaps.
+    Runs after EPSS enrichment. Batches CVEs that need enrichment only.
+    """
+    if not VULNCHECK_API_KEY:
+        return advisories
+
+    # Only enrich CVEs that are missing CVSS or have Unknown severity
+    needs_enrichment = [
+        a for a in advisories
+        if a.get("cve","").startswith("CVE-")
+        and (not a.get("cvss") or a.get("severity") == "Unknown")
+        and a.get("source") not in ("vulncheck_nvd","vulncheck_kev")
+    ]
+    if not needs_enrichment:
+        return advisories
+
+    # Limit to top 50 by severity priority to stay within rate limits
+    needs_enrichment = needs_enrichment[:50]
+    vc_map = {}
+
+    for a in needs_enrichment:
+        cve_id = a["cve"]
+        try:
+            r = requests.get(
+                f"https://api.vulncheck.com/v3/index/vulncheck-nvd2",
+                params={"cve": cve_id},
+                headers={
+                    "Authorization": f"Bearer {VULNCHECK_API_KEY}",
+                    "Accept": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                },
+                timeout=8
+            )
+            if r.status_code == 200:
+                data = (r.json().get("data") or [{}])[0]
+                cvss_val = None; severity = None
+                for mk in ["cvssMetricV31","cvssMetricV40","cvssMetricV30"]:
+                    metrics = data.get("metrics",{}).get(mk,[])
+                    if metrics:
+                        score = metrics[0].get("cvssData",{}).get("baseScore")
+                        if score:
+                            cvss_val = float(score)
+                            sev = metrics[0].get("cvssData",{}).get("baseSeverity","")
+                            severity = sev.capitalize() if sev else None
+                            break
+                vc_map[cve_id] = {
+                    "cvss": cvss_val,
+                    "severity": severity,
+                    "xdb": data.get("vulncheck_xdb",[]),
+                    "reported": data.get("vulncheck_reported_exploitation",[]),
+                    "ransomware": data.get("vulncheck_kev",{}).get("knownRansomwareCampaignUse",""),
+                }
+        except Exception as e:
+            log.debug(f"[VulnCheck enrich] {cve_id}: {e}")
+            continue
+
+    # Apply enrichment
+    enriched_count = 0
+    for a in advisories:
+        cve = a.get("cve","")
+        if cve in vc_map:
+            vc = vc_map[cve]
+            if vc["cvss"] and not a.get("cvss"):
+                a["cvss"] = vc["cvss"]
+                enriched_count += 1
+            if vc["severity"] and a.get("severity") == "Unknown":
+                a["severity"] = vc["severity"]
+            if vc["xdb"] and not a.get("zeroDay"):
+                a["zeroDay"] = True
+                a["kev_notes"] = (a.get("kev_notes","") + f" | {len(vc['xdb'])} exploit PoC(s)").strip(" |")
+            if vc["ransomware"] == "Known":
+                a["tags"] = list(set((a.get("tags") or []) + ["ransomware"]))
+                a["kev_notes"] = (a.get("kev_notes","") + " | Ransomware campaign known").strip(" |")
+
+    if enriched_count:
+        log.info(f"[VulnCheck enrich] Backfilled {enriched_count} CVEs with CVSS/exploit data")
+    return advisories
+
+
 def fetch_all_advisories() -> list:
     results = []; futures = {}
     with ThreadPoolExecutor(max_workers=25) as executor:
         for key, url in TRUSTED_FEEDS.items():
-            if key == "cisa_kev":    futures[executor.submit(fetch_cisa_kev)] = key
-            elif key == "ghsa":      futures[executor.submit(fetch_ghsa)] = key
-            elif key == "osv":       futures[executor.submit(fetch_osv)] = key
-            elif key == "mitre_cve": futures[executor.submit(fetch_mitre_cve)] = key
-            else:                    futures[executor.submit(fetch_rss, key, url)] = key
+            if key == "cisa_kev":        futures[executor.submit(fetch_cisa_kev)] = key
+            elif key == "ghsa":           futures[executor.submit(fetch_ghsa)] = key
+            elif key == "osv":            futures[executor.submit(fetch_osv)] = key
+            elif key == "mitre_cve":      futures[executor.submit(fetch_mitre_cve)] = key
+            elif key == "vulncheck_nvd":  futures[executor.submit(fetch_vulncheck_nvd)] = key
+            elif key == "vulncheck_kev":  futures[executor.submit(fetch_vulncheck_kev)] = key
+            else:                         futures[executor.submit(fetch_rss, key, url)] = key
         for future in as_completed(futures):
             try: results.extend(future.result())
             except Exception as e: log.error(f"Thread error: {e}")
@@ -1099,6 +1369,11 @@ def fetch_all_advisories() -> list:
         results = enrich_with_epss(results)
     except Exception as e:
         log.warning(f"[EPSS] Enrichment failed (non-fatal): {e}")
+    # Enrich with VulnCheck — backfill missing CVSS + exploit intel
+    try:
+        results = enrich_with_vulncheck(results)
+    except Exception as e:
+        log.warning(f"[VulnCheck] Enrichment failed (non-fatal): {e}")
     return results
 
 # ─── AUTH ─────────────────────────────────────────────────────────────────────
