@@ -37,6 +37,7 @@ PORT             = int(os.getenv("PORT",3001))
 SUPABASE_URL     = os.getenv("SUPABASE_URL","").rstrip("/")
 SUPABASE_KEY     = os.getenv("SUPABASE_KEY","")
 FETCH_WINDOW_DAYS = 30   # Drop feed items older than this many days at ingest
+CRON_SECRET       = os.getenv("CRON_SECRET", "")   # Secret token for /fetch-now endpoint
 
 # ─── CACHE ────────────────────────────────────────────────────────────────────
 cache      = TTLCache(maxsize=200, ttl=3600)
@@ -1457,11 +1458,70 @@ def scheduled_patch_tuesday():
         log.info(f"[CRON] Patch Tuesday digest sent — {len(ms_adv)} MS advisories")
     except Exception as e: log.error(f"[CRON] Patch Tuesday: {e}")
 
+# ─── FETCH-NOW ENDPOINT (for cron-job.org external trigger) ──────────────────
+_fetch_in_progress = threading.Event()
+
+def _background_fetch_and_cache():
+    """Run a full feed fetch and save to Supabase. Called from /fetch-now."""
+    if _fetch_in_progress.is_set():
+        log.info("[FETCH-NOW] Already in progress — skipping duplicate trigger")
+        return
+    _fetch_in_progress.set()
+    try:
+        log.info("[FETCH-NOW] Starting background fetch triggered by cron-job.org")
+        advisories = fetch_all_advisories()
+        if SUPABASE_URL and advisories:
+            supa_save_advisory_cache(advisories)
+            log.info(f"[FETCH-NOW] ✅ Fetched {len(advisories)} advisories and saved to cache")
+        else:
+            log.warning("[FETCH-NOW] No advisories fetched or Supabase not configured")
+    except Exception as e:
+        log.error(f"[FETCH-NOW] ❌ Error: {e}")
+    finally:
+        _fetch_in_progress.clear()
+
+@app.route("/fetch-now", methods=["GET","POST"])
+def fetch_now():
+    """
+    External cron trigger endpoint. Call this from cron-job.org every 30 minutes.
+    Requires CRON_SECRET env var to match ?secret= query param or X-Cron-Secret header.
+    If CRON_SECRET is not set, endpoint is disabled.
+
+    cron-job.org setup:
+      URL: https://security-advisory-proxy.onrender.com/fetch-now?secret=YOUR_SECRET
+      Schedule: Every 30 minutes
+      Method: GET
+    """
+    if not CRON_SECRET:
+        return jsonify({"error": "CRON_SECRET not configured — endpoint disabled"}), 403
+
+    # Accept secret via query param or header
+    provided = (request.args.get("secret","") or
+                request.headers.get("X-Cron-Secret","") or
+                (request.json or {}).get("secret",""))
+
+    if provided != CRON_SECRET:
+        log.warning(f"[FETCH-NOW] Unauthorized attempt from {request.remote_addr}")
+        return jsonify({"error": "Unauthorized"}), 401
+
+    # Fire-and-forget in background thread — return immediately so cron-job.org doesn't time out
+    t = threading.Thread(target=_background_fetch_and_cache, daemon=True)
+    t.start()
+
+    return jsonify({
+        "status": "accepted",
+        "message": "Background fetch started",
+        "in_progress": _fetch_in_progress.is_set()
+    }), 202
+
+
 scheduler = BackgroundScheduler(timezone="UTC")
 scheduler.add_job(scheduled_email,         "cron", hour=2,  minute=30)   # 8:00 AM IST
 scheduler.add_job(scheduled_teams,         "cron", hour=2,  minute=35)   # 8:05 AM IST
 scheduler.add_job(scheduled_patch_tuesday, "cron", hour=3,  minute=0)    # 8:30 AM IST on Patch Tuesdays
 scheduler.add_job(supa_purge_old_acks,     "cron", hour=0,  minute=0)    # Midnight UTC — purge old acks
+scheduler.add_job(_background_fetch_and_cache, "interval", minutes=30,  # Fallback: internal 30-min fetch
+                  id="background_fetch", replace_existing=True)          # (cron-job.org is primary trigger)
 scheduler.start()
 
 if __name__ == "__main__":
