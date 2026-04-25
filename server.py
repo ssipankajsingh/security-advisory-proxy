@@ -345,9 +345,9 @@ TRUSTED_FEEDS = {
     # ══ ENDPOINT SECURITY ════════════════════════════════════════════════════
     "crowdstrike_blog":       "https://www.crowdstrike.com/blog/feed/",
     "sentinelone":            "https://www.sentinelone.com/labs/feed/",
-    "sophos":                 "https://news.sophos.com/en-us/category/threat-research/feed/",
+    "sophos":                 "https://www.welivesecurity.com/en/feed/",
     "trendmicro":             "https://feeds.feedburner.com/Anti-MalwareBlog",
-    "trellix":                "https://www.rapid7.com/blog/feed/tag/research/",
+    "trellix":                "https://www.rapid7.com/blog/feed/",
     "malwarebytes":           "https://www.malwarebytes.com/blog/feed/",
     "eset":                   "https://www.welivesecurity.com/feed/",
 
@@ -373,7 +373,7 @@ TRUSTED_FEEDS = {
     "netskope":     "https://www.netskope.com/blog/feed",
     "proofpoint":   "https://www.proofpoint.com/us/rss.xml",
     "solarwinds":   "https://www.solarwinds.com/shared-content/rss-feed/solarwinds-cve-rss-feed.xml",
-    "forescout":    "https://claroty.com/team82/feed",
+    "forescout":    "https://claroty.com/blog/feed/",
 
     # ══ THREAT INTEL ══════════════════════════════════════════════════════════
     "mandiant":     "https://www.mandiant.com/resources/blog/rss.xml",
@@ -1332,7 +1332,7 @@ def fetch_vulncheck_kev() -> list:
     try:
         resp = requests.get(
             "https://api.vulncheck.com/v3/index/vulncheck-kev",
-            params={"page": 0, "limit": 100},
+            params={"limit": 100},
             headers={
                 "Authorization": f"Bearer {VULNCHECK_API_KEY}",
                 "Accept": "application/json",
