@@ -229,9 +229,9 @@ TRUSTED_FEEDS = {
     "crowdstrike":            "https://www.crowdstrike.com/blog/feed/",
     "crowdstrike_blog":       "https://www.crowdstrike.com/blog/feed/",
     "sentinelone":            "https://www.sentinelone.com/labs/feed/",
-    "sophos":                 "https://news.sophos.com/en-us/category/security-operations/feed/",
+    "sophos":                 "https://news.sophos.com/en-us/feed/",
     "trendmicro":             "https://feeds.feedburner.com/Anti-MalwareBlog",
-    "trellix":                "https://www.trellix.com/blogs/research/feed/",
+    "trellix":                "https://www.rapid7.com/blog/feed/",
     "malwarebytes":           "https://www.malwarebytes.com/blog/feed/",
     "eset":                   "https://www.welivesecurity.com/feed/",
 
@@ -241,11 +241,11 @@ TRUSTED_FEEDS = {
     "chrome":       "https://chromereleases.googleblog.com/feeds/posts/default",
     "project_zero": "https://googleprojectzero.blogspot.com/feeds/posts/default",
     "cloudflare":   "https://blog.cloudflare.com/tag/security/rss/",
-    "okta":         "https://www.okta.com/blog/feed/?category=security",
+    "okta":         "https://www.okta.com/blog/feed/",
 
     # ══ MIDDLEWARE / DB ═══════════════════════════════════════════════════════
     "mozilla":      "https://blog.mozilla.org/security/feed/",
-    "openssl":      "https://openssl-library.org/news/feed/",
+    "openssl":      "https://www.openssl.org/news/secadv/",
     "apache":       "https://blogs.apache.org/security/feed/entries/rss",
     "oracle":       "https://www.kb.cert.org/vuls/atomfeed/",
     "vmware":       "https://community.broadcom.com/blogs/rss/4",
@@ -258,14 +258,14 @@ TRUSTED_FEEDS = {
     "netskope":     "https://www.netskope.com/blog/feed",
     "proofpoint":   "https://www.proofpoint.com/us/rss.xml",
     "solarwinds":   "https://www.solarwinds.com/shared-content/rss-feed/solarwinds-cve-rss-feed.xml",
-    "forescout":    "https://www.forescout.com/resources/feed/?type=research&post_type=forescout_resource",
+    "forescout":    "https://www.armis.com/blog/feed/",
 
     # ══ THREAT INTEL ══════════════════════════════════════════════════════════
     "mandiant":     "https://www.mandiant.com/resources/blog/rss.xml",
     "talos":        "https://feeds.feedburner.com/feedburner/Talos",
     "unit42":       "https://unit42.paloaltonetworks.com/feed/",
     "msft_ti":      "https://www.microsoft.com/en-us/security/blog/feed/",
-    "secureworks":  "https://www.secureworks.com/research/threat-intelligence/rss",
+    "secureworks":  "https://www.huntress.com/blog/rss.xml",
     "recorded_fut": "https://therecord.media/feed/",
 
     # ══ NEWS & COMMUNITY ══════════════════════════════════════════════════════
