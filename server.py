@@ -1599,14 +1599,27 @@ def sources():
 def advisories():
     try:
         force = request.args.get("force","false").lower() == "true"
-        # Only serve from cache on auto-refresh (not manual/first load)
-        if not force and SUPABASE_URL:
+
+        # Always try Supabase cache first — fast response regardless of force flag
+        # force=true triggers a background refresh AFTER serving cached data
+        if SUPABASE_URL:
             cached = supa_load_advisory_cache()
             if len(cached) > 50:
-                log.info(f"[ADVISORIES] Cache hit: {len(cached)} items")
+                log.info(f"[ADVISORIES] Cache hit: {len(cached)} items (force={force})")
+                if force:
+                    # Trigger background live fetch to refresh cache — non-blocking
+                    def _bg_refresh():
+                        try:
+                            fresh = fetch_all_advisories()
+                            if fresh: supa_save_advisory_cache(fresh)
+                        except Exception as e:
+                            log.error(f"[ADVISORIES] Background refresh failed: {e}")
+                    threading.Thread(target=_bg_refresh, daemon=True).start()
                 return jsonify({"total":len(cached),"generated":datetime.now(timezone.utc).isoformat(),
                     "advisories":cached[:5000],"source":"cache"})
-        # Live fetch
+
+        # No cache available — live fetch (first ever startup)
+        log.info("[ADVISORIES] No cache found — doing live fetch")
         all_adv = fetch_all_advisories()
         if SUPABASE_URL and all_adv:
             def _save_with_retry(adv):
