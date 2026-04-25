@@ -345,9 +345,9 @@ TRUSTED_FEEDS = {
     # ══ ENDPOINT SECURITY ════════════════════════════════════════════════════
     "crowdstrike_blog":       "https://www.crowdstrike.com/blog/feed/",
     "sentinelone":            "https://www.sentinelone.com/labs/feed/",
-    "sophos":                 "https://news.sophos.com/en-us/feed/",
+    "sophos":                 "https://news.sophos.com/en-us/category/threat-research/feed/",
     "trendmicro":             "https://feeds.feedburner.com/Anti-MalwareBlog",
-    "trellix":                "https://www.rapid7.com/blog/feed/",
+    "trellix":                "https://www.rapid7.com/blog/feed/tag/research/",
     "malwarebytes":           "https://www.malwarebytes.com/blog/feed/",
     "eset":                   "https://www.welivesecurity.com/feed/",
 
@@ -357,7 +357,7 @@ TRUSTED_FEEDS = {
     "chrome":       "https://chromereleases.googleblog.com/feeds/posts/default",
     "project_zero": "https://googleprojectzero.blogspot.com/feeds/posts/default",
     "cloudflare":   "https://blog.cloudflare.com/tag/security/rss/",
-    "okta":         "https://www.okta.com/blog/feed/",
+    "okta":         "https://developer.okta.com/feed.xml",
 
     # ══ MIDDLEWARE / DB ═══════════════════════════════════════════════════════
     "mozilla":      "https://blog.mozilla.org/security/feed/",
@@ -373,7 +373,7 @@ TRUSTED_FEEDS = {
     "netskope":     "https://www.netskope.com/blog/feed",
     "proofpoint":   "https://www.proofpoint.com/us/rss.xml",
     "solarwinds":   "https://www.solarwinds.com/shared-content/rss-feed/solarwinds-cve-rss-feed.xml",
-    "forescout":    "https://www.armis.com/blog/feed/",
+    "forescout":    "https://claroty.com/team82/feed",
 
     # ══ THREAT INTEL ══════════════════════════════════════════════════════════
     "mandiant":     "https://www.mandiant.com/resources/blog/rss.xml",
@@ -1332,7 +1332,7 @@ def fetch_vulncheck_kev() -> list:
     try:
         resp = requests.get(
             "https://api.vulncheck.com/v3/index/vulncheck-kev",
-            params={"sort": "dateAdded:desc", "limit": 100},
+            params={"page": 0, "limit": 100},
             headers={
                 "Authorization": f"Bearer {VULNCHECK_API_KEY}",
                 "Accept": "application/json",
