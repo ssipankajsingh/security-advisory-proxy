@@ -411,7 +411,7 @@ OEM_TIER1 = {
 
 # ─── STARTUP LOG ──────────────────────────────────────────────────────────────
 log.info(f"🛡️  Security Advisory Proxy v2 — port {PORT}")
-log.info(f"   Sources   : {SOURCE_COUNT} configured (+ GHSA/OSV/MITRE/VulnCheck pre-NVD)")
+log.info(f"   Sources   : 148 monitored / {SOURCE_COUNT} active feeds (+ GHSA/OSV/MITRE/VulnCheck pre-NVD)")
 log.info(f"   VulnCheck : {'✅ API key set' if VULNCHECK_API_KEY else '⚠️  No API key (set VULNCHECK_API_KEY for pre-NVD data)'}")
 log.info(f"   Email     : {'✅ SendGrid' if SENDGRID_API_KEY else '⚠️  No SendGrid'}")
 log.info(f"   Auth      : {'✅ Access code set' if ACCESS_CODE else '⚠️  No access code'}")
@@ -430,12 +430,12 @@ ZERO_DAY_SOURCES = {
 
 # News/blog sources — these are articles, not structured advisories
 NEWS_SOURCES = {
-    # General security news sites
-    "krebs","bleeping","hackernews","secweek","darkread","helpnet",
-    "ars_security","reddit_netsec","threatpost","schneier","cybersecnews",
-    "gbhackers","cyberinsider","qualys_blog","sans_isc",
+    # General security news sites — articles only, no CVE IDs
+    "krebs","bleeping","hackernews","securityweek","darkreading","helpnetsec",
+    "ars_security","wired_sec","reddit_netsec","threatpost","schneier",
+    "cybersecnews","gbhackers","cyberinsider","qualys_blog","sans_isc",
     # Threat intelligence & research blogs (articles, not structured advisories)
-    "mandiant","talos","unit42","msft_ti","secureworks","recorded_future",
+    "mandiant","talos","unit42","msft_ti","secureworks","recorded_fut",
     "crowdstrike_blog",   # CrowdStrike blog (Patch Tuesday analysis etc.)
     "msrc_blog",          # MSRC blog posts (msrc feed = structured advisories, kept separate)
     "sentinelone",        # SentinelLabs threat research
@@ -1226,7 +1226,7 @@ def fetch_vulncheck_nvd() -> list:
     try:
         since = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%S")
         resp = requests.get(
-            "https://api.vulncheck.com/v3/index/vulncheck-nvd2",
+            "https://api.vulncheck.com/v3/index/nist-nvd2",
             params={"pubStartDate": since, "resultsPerPage": 100},
             headers={
                 "Accept": "application/json",
@@ -1434,7 +1434,7 @@ def enrich_with_vulncheck(advisories: list) -> list:
         cve_id = a["cve"]
         try:
             r = requests.get(
-                f"https://api.vulncheck.com/v3/index/vulncheck-nvd2",
+                f"https://api.vulncheck.com/v3/index/nist-nvd2",
                 params={"cve": cve_id},
                 headers={
                     "Accept": "application/json",
