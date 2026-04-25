@@ -347,7 +347,7 @@ TRUSTED_FEEDS = {
     "sentinelone":            "https://www.sentinelone.com/labs/feed/",
     "sophos":                 "https://www.welivesecurity.com/en/feed/",
     "trendmicro":             "https://feeds.feedburner.com/Anti-MalwareBlog",
-    "trellix":                "https://www.rapid7.com/blog/feed/",
+    "trellix":                "https://www.rapid7.com/blog/rss/",
     "malwarebytes":           "https://www.malwarebytes.com/blog/feed/",
     "eset":                   "https://www.welivesecurity.com/feed/",
 
@@ -373,7 +373,7 @@ TRUSTED_FEEDS = {
     "netskope":     "https://www.netskope.com/blog/feed",
     "proofpoint":   "https://www.proofpoint.com/us/rss.xml",
     "solarwinds":   "https://www.solarwinds.com/shared-content/rss-feed/solarwinds-cve-rss-feed.xml",
-    "forescout":    "https://claroty.com/blog/feed/",
+    "forescout":    "https://claroty.com/team82/blog/rss.xml",
 
     # ══ THREAT INTEL ══════════════════════════════════════════════════════════
     "mandiant":     "https://www.mandiant.com/resources/blog/rss.xml",
@@ -1224,7 +1224,7 @@ def fetch_vulncheck_nvd() -> list:
     with cache_lock:
         if "vulncheck_nvd" in cache: return cache["vulncheck_nvd"]
     try:
-        since = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%S")
+        since = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%d")  # nist-nvd2 needs YYYY-MM-DD
         resp = requests.get(
             "https://api.vulncheck.com/v3/index/nist-nvd2",
             params={"pubStartDate": since, "resultsPerPage": 100},
