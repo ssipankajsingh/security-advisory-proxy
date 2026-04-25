@@ -303,6 +303,14 @@ log.info(f"   Supabase  : {'✅ Persistent storage' if SUPABASE_URL else '⚠️
 
 # ─── HELPERS ──────────────────────────────────────────────────────────────────
 
+
+# Sources where ALL items are considered zero-day / actively exploited by definition
+ZERO_DAY_SOURCES = {
+    "cisa_kev",       # CISA Known Exploited Vulnerabilities — confirmed active exploitation
+    "zdi_published",  # Zero Day Initiative published advisories
+    "exploit_db",     # Exploit-DB — public exploits exist
+}
+
 # News/blog sources — these are articles, not structured advisories
 NEWS_SOURCES = {
     "krebs","bleeping","hackernews","secweek","darkread","helpnet",
@@ -322,18 +330,20 @@ SEVERITY_KEYWORDS = {
     "Low":     ["low","cvss 1","cvss 2","cvss 3","cvss 4","minor","low severity"],
 }
 
-def parse_severity(text:str) -> str:
-    # First try CVSS score directly — most reliable
+def parse_severity(text:str, source:str="", is_oem:bool=False) -> str:
+    # 1) CVSS score — most reliable
     score = extract_cvss_v3(text)
     if score is not None:
         if score >= 9.0: return "Critical"
         if score >= 7.0: return "High"
         if score >= 4.0: return "Medium"
         return "Low"
-    # Fall back to keyword matching
+    # 2) Keyword matching
     t = text.lower()
     for sev, kws in SEVERITY_KEYWORDS.items():
         if any(k in t for k in kws): return sev
+    # 3) Source-tier inference: OEM Tier1 with no other signal = High (not Unknown)
+    if is_oem: return "High"
     return "Unknown"
 
 def extract_cvss_v3(text:str):
@@ -494,24 +504,37 @@ def data_quality(advisory:dict) -> str:
     if score >= 3: return "partial"
     return "thin"
 
+def _title_fingerprint(title:str) -> str:
+    """Normalised title fingerprint for fuzzy dedup of non-CVE items."""
+    t = re.sub(r"[^a-z0-9 ]", "", title.lower())
+    words = [w for w in t.split() if len(w) > 3 and w not in
+             {"this","that","with","from","have","been","will","your","they","their",
+              "security","advisory","update","patch","vulnerability","issue","fixes"}]
+    return " ".join(sorted(words[:8]))  # sort so word-order differences don't matter
+
 def dedupe_and_enrich(items:list) -> list:
     """
-    Deduplicate advisories by CVE ID or URL, merging source information.
+    Deduplicate advisories by CVE ID, URL, or fuzzy title (for non-CVE news items).
     OEM entries always win (sorted first). Tracks all sources that reported each CVE.
     """
-    seen_cve  = {}
-    seen_url  = {}
-    out       = []
+    seen_cve   = {}
+    seen_url   = {}
+    seen_title = {}  # fuzzy title fingerprint → index
+    out        = []
 
     for a in items:
         cve = (a.get("cve") or "").upper().strip()
         uid = a.get("id","").strip()
+        tfp = _title_fingerprint(a.get("title","")) if not cve else ""
 
         merge_idx = None
         if cve and cve.startswith("CVE-"):
             merge_idx = seen_cve.get(cve)
         if merge_idx is None:
             merge_idx = seen_url.get(uid)
+        # Fuzzy title dedup only for non-CVE items (news/blog articles)
+        if merge_idx is None and tfp and len(tfp) > 10:
+            merge_idx = seen_title.get(tfp)
 
         if merge_idx is not None:
             existing = out[merge_idx]
@@ -538,6 +561,8 @@ def dedupe_and_enrich(items:list) -> list:
             if cve and cve.startswith("CVE-"):
                 seen_cve[cve] = idx_new
             seen_url[uid] = idx_new
+            if tfp and len(tfp) > 10:
+                seen_title[tfp] = idx_new
             out.append(a)
 
     log.info(f"[DEDUPE] {len(items)} -> {len(out)} ({len(items)-len(out)} duplicates merged)")
@@ -624,10 +649,17 @@ def normalise_entry(entry, source:str) -> dict:
     # Bug/advisory ID extraction
     bug_id = extract_bug_id(entry, source)
 
-    is_oem     = source in OEM_TIER1
-    is_news    = source in NEWS_SOURCES
-    cvss_score = extract_cvss_v3(combined)
-    severity   = parse_severity(combined)
+    is_oem       = source in OEM_TIER1
+    is_news      = source in NEWS_SOURCES
+    is_zero_src  = source in ZERO_DAY_SOURCES
+    cvss_score   = extract_cvss_v3(combined)
+    severity_raw = parse_severity(combined, source=source, is_oem=is_oem)
+    # NEWS items capped at Medium — keyword matches on news titles inflate severity
+    severity = min(["Critical","High","Medium","Low","Unknown"].index(severity_raw),
+                   ["Critical","High","Medium","Low","Unknown"].index("Medium") if is_news else 0)
+    severity = ["Critical","High","Medium","Low","Unknown"][severity]
+    # Zero-day: keyword detection OR source-based inference
+    zero_day = is_zero_day(combined) or is_zero_src
 
     advisory = {
         "id":               all_cves[0] if all_cves else (link or title_raw),
@@ -642,7 +674,7 @@ def normalise_entry(entry, source:str) -> dict:
         "cvss":             cvss_score,
         "cve":              all_cves[0] if all_cves else None,
         "cves":             all_cves[:10],
-        "zeroDay":          is_zero_day(combined),
+        "zeroDay":          zero_day,
         "source":           source,
         "vendor":           source,
         "products":         products,
