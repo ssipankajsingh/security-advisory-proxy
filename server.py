@@ -175,8 +175,8 @@ TRUSTED_FEEDS = {
 
     # ══ TIER 0: MASTER AGGREGATORS ═══════════════════════════════════════════
     "cvefeed_all":           "https://cvefeed.io/rssfeed/",
-    "cvefeed_high_critical": "https://cvefeed.io/rssfeed/high.xml",
-    "github_advisories":     "https://github.com/advisories.atom",
+    "cvefeed_high_critical": "https://cvefeed.io/rssfeed/severity/high.xml",
+    "github_advisories":     "https://github.com/security-advisories/feed.atom",
     "cvedaily_all":          "https://cvedaily.com/feed.xml",
     "cvedaily_new":          "https://cvedaily.com/feed-new.xml",
     "cvedaily_critical":     "https://cvedaily.com/feed-critical.xml",
@@ -184,7 +184,7 @@ TRUSTED_FEEDS = {
     # ══ GOVERNMENT & CERT ════════════════════════════════════════════════════
     "cisa_alerts":       "https://www.cisa.gov/cybersecurity-advisories/all.xml",
     "cisa_kev":          "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
-    "cisa_ics":          "https://www.cisa.gov/ics/advisories/rss.xml",
+    "cisa_ics":          "https://www.cisa.gov/cybersecurity-advisories/ics-advisories.xml",
     "ncsc_uk":           "https://www.ncsc.gov.uk/api/1/services/v1/report-rss-feed.xml",
     "us_cert":           "https://www.cisa.gov/cybersecurity-advisories/all.xml",
     "cert_eu":           "https://cert.europa.eu/publications/security-advisories-rss",
@@ -198,7 +198,7 @@ TRUSTED_FEEDS = {
     "zdi_upcoming":  "https://www.zerodayinitiative.com/rss/upcoming/",
     "vuldb":         "https://vuldb.com/?rss.recent",
     "packetstorm":   "https://rss.packetstormsecurity.com/files/",
-    "nvd_recent":    "https://nvd.nist.gov/feeds/xml/cve/misc/nvd-rss-analyzed.xml",
+    "nvd_recent":    "https://vulners.com/rss.xml?query=type:cve",
 
     # ══ OS & PLATFORM ════════════════════════════════════════════════════════
     "msrc":         "https://api.msrc.microsoft.com/update-guide/rss",
@@ -206,33 +206,32 @@ TRUSTED_FEEDS = {
     "ms_azure":     "https://techcommunity.microsoft.com/t5/s/gxcuf89792/rss/board?board.id=MicrosoftSecurityandCompliance",
     "apple":        "https://support.apple.com/en-in/rss/securityupdates.rss",
     "ubuntu":       "https://ubuntu.com/security/notices/rss.xml",
-    "android":      "https://source.android.com/security/bulletin/rss.xml",
-    "redhat":       "https://access.redhat.com/security/data/rss",
+    "android":      "https://security.googleblog.com/feeds/posts/default",
+    "redhat":       "https://access.redhat.com/feeds/latest-errata.rss",
     "debian":       "https://www.debian.org/security/dsa-long",
-    "docker":       "https://docs.docker.com/security/rss.xml",
+    "docker":       "https://www.docker.com/blog/category/security/feed/",
 
     # ══ NETWORK & FIREWALL ═══════════════════════════════════════════════════
     "cisco":        "https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml",
     "fortinet":     "https://www.fortiguard.com/rss/ir.xml",
     "paloalto":     "https://security.paloaltonetworks.com/rss.xml",
-    "paloalto_psirt":"https://securityadvisories.paloaltonetworks.com/rss.xml",
     "sonicwall":    "https://blog.sonicwall.com/feed/",
-    "ivanti":       "https://forums.ivanti.com/s/rss/security-advisories",
+    "ivanti":       "https://www.ivanti.com/blog/topics/security-advisory/rss",
     "f5":           "https://support.f5.com/rss/security-advisories.xml",
     "checkpoint":   "https://research.checkpoint.com/feed/",
     "juniper":      "https://kb.juniper.net/JSA/rss",
-    "citrix":       "https://www.citrix.com/blogs/security/rss.xml",
-    "aruba":        "https://www.arubanetworks.com/security-advisories/feed",
+    "citrix":       "https://support.citrix.com/feed/news",
+    "aruba":        "https://support.hpe.com/hpesc/public/home/rss?docType=Security+Bulletin&sort=modified",
     "netgear":      "https://kb.netgear.com/app/answers/detail/a_id/62001",
     "zyxel":        "https://www.zyxel.com/global/en/support/security-advisories.shtml",
 
     # ══ ENDPOINT SECURITY ════════════════════════════════════════════════════
-    "crowdstrike":            "https://www.crowdstrike.com/security-advisories/feed/",
+    "crowdstrike":            "https://www.crowdstrike.com/blog/feed/",
     "crowdstrike_blog":       "https://www.crowdstrike.com/blog/feed/",
     "sentinelone":            "https://www.sentinelone.com/labs/feed/",
-    "sophos":                 "https://www.sophos.com/en-us/rss/security-advisories",
-    "trendmicro":             "https://success.trendmicro.com/rss",
-    "trellix":                "https://www.trellix.com/en-us/rss/security-advisories.xml",
+    "sophos":                 "https://news.sophos.com/en-us/feed/",
+    "trendmicro":             "https://feeds.trendmicro.com/TrendMicroSimplySecurity",
+    "trellix":                "https://www.trellix.com/blogs/feed/",
     "malwarebytes":           "https://www.malwarebytes.com/blog/feed/",
     "eset":                   "https://www.welivesecurity.com/feed/",
 
@@ -242,24 +241,24 @@ TRUSTED_FEEDS = {
     "chrome":       "https://chromereleases.googleblog.com/feeds/posts/default",
     "project_zero": "https://googleprojectzero.blogspot.com/feeds/posts/default",
     "cloudflare":   "https://blog.cloudflare.com/tag/security/rss/",
-    "okta":         "https://sec.okta.com/feed/",
+    "okta":         "https://trust.okta.com/feed/",
 
     # ══ MIDDLEWARE / DB ═══════════════════════════════════════════════════════
     "mozilla":      "https://blog.mozilla.org/security/feed/",
-    "openssl":      "https://openssl-library.org/news/feed.xml",
-    "apache":       "https://blogs.apache.org/foundation/feed/entries/rss",
-    "oracle":       "https://www.oracle.com/security-alerts/rss/",
-    "vmware":       "https://www.vmware.com/security/advisories.xml",
+    "openssl":      "https://openssl.org/news/feed.atom",
+    "apache":       "https://blogs.apache.org/security/feed/entries/rss",
+    "oracle":       "https://www.kb.cert.org/vuls/atomfeed/",
+    "vmware":       "https://support.broadcom.com/rss/security-advisory.rss",
     "splunk":       "https://advisory.splunk.com/feed.xml",
     "veeam":        "https://www.veeam.com/rss/security-advisories.xml",
-    "nginx":        "https://nginx.org/en/security_advisories.xml",
+    "nginx":        "https://nginx.org/en/CHANGES.rss",
 
     # ══ YOUR STACK ═══════════════════════════════════════════════════════════
     "cortex_xdr":   "https://security.paloaltonetworks.com/rss.xml",
     "netskope":     "https://www.netskope.com/blog/feed",
     "proofpoint":   "https://www.proofpoint.com/us/rss.xml",
     "solarwinds":   "https://www.solarwinds.com/shared-content/rss-feed/solarwinds-cve-rss-feed.xml",
-    "forescout":    "https://www.forescout.com/resources/feed/?type=advisory",
+    "forescout":    "https://www.forescout.com/blog/feed/",
 
     # ══ THREAT INTEL ══════════════════════════════════════════════════════════
     "mandiant":     "https://www.mandiant.com/resources/blog/rss.xml",
@@ -267,7 +266,7 @@ TRUSTED_FEEDS = {
     "unit42":       "https://unit42.paloaltonetworks.com/feed/",
     "msft_ti":      "https://www.microsoft.com/en-us/security/blog/feed/",
     "secureworks":  "https://www.secureworks.com/blog/rss",
-    "recorded_fut": "https://www.recordedfuture.com/category/research/feed/",
+    "recorded_fut": "https://therecord.media/feed/",
 
     # ══ NEWS & COMMUNITY ══════════════════════════════════════════════════════
     "krebs":        "https://krebsonsecurity.com/feed/",
@@ -287,7 +286,7 @@ SOURCE_COUNT = len(TRUSTED_FEEDS)
 
 # OEM/Vendor Tier 1 — shown first in feed (direct vendor PSIRTs)
 OEM_TIER1 = {
-    "msrc","cisco","fortinet","paloalto","paloalto_psirt","juniper","f5","sonicwall",
+    "msrc","cisco","fortinet","paloalto","juniper","f5","sonicwall",
     "ivanti","citrix","checkpoint","vmware","crowdstrike","sophos","apple","ubuntu",
     "redhat","android","oracle","splunk","veeam","cisa_kev","cisa_alerts","cisa_ics",
     "ncsc_uk","cert_eu","cert_in","zdi_published","mozilla","openssl","cortex_xdr",
@@ -697,8 +696,11 @@ def fetch_rss(key:str, url:str) -> list:
         if key in cache: return cache[key]
     if key == "mozilla": return fetch_mozilla_json()
     try:
+        # Add Accept header for feeds that require it (e.g. GitHub atom)
+        extra_hdrs = {"Accept":"application/atom+xml,application/rss+xml,application/xml,text/xml,*/*"} if "github.com" in url else {}
         resp = requests.get(url, timeout=15, headers={
-            "User-Agent":"SecurityAdvisoryBot/2.0 (Enterprise Security Monitor)",
+            "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            **extra_hdrs,
             "Accept":"application/rss+xml,application/atom+xml,application/xml,text/xml,*/*",
         }, allow_redirects=True)
         resp.raise_for_status()
@@ -710,7 +712,7 @@ def fetch_rss(key:str, url:str) -> list:
         return items
     except requests.exceptions.SSLError:
         try:
-            resp  = requests.get(url, timeout=15, verify=False, headers={"User-Agent":"SecurityAdvisoryBot/2.0"})
+            resp  = requests.get(url, timeout=15, verify=False, headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"})
             feed  = feedparser.parse(resp.content)
             items = [x for x in [normalise_entry(e, key) for e in (feed.entries or [])[:50]] if x is not None]
             log.warning(f"[{key}] SSL bypass — {len(items)} items")
@@ -723,8 +725,8 @@ def fetch_mozilla_json() -> list:
     with cache_lock:
         if "mozilla" in cache: return cache["mozilla"]
     try:
-        resp = requests.get("https://www.mozilla.org/en-US/security/advisories/cve-feed.json",
-                            timeout=15, headers={"User-Agent":"SecurityAdvisoryBot/2.0"})
+        resp = requests.get("https://blog.mozilla.org/security/feed/",
+                            timeout=15, headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"})
         resp.raise_for_status()
         data = resp.json()
         items = []
@@ -751,7 +753,7 @@ def fetch_cisa_kev() -> list:
         if "cisa_kev" in cache: return cache["cisa_kev"]
     try:
         resp = requests.get("https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
-                            timeout=15, headers={"User-Agent":"SecurityAdvisoryBot/2.0"})
+                            timeout=15, headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"})
         resp.raise_for_status()
         items = []
         for v in resp.json().get("vulnerabilities",[])[:50]:
@@ -790,7 +792,7 @@ def enrich_with_epss(advisories:list) -> list:
                 "https://api.first.org/data/v1/epss",
                 params={"cve": ",".join(batch), "limit": BATCH},
                 timeout=10,
-                headers={"User-Agent":"SecurityAdvisoryBot/2.0"}
+                headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
             )
             if resp.status_code == 200:
                 for item in resp.json().get("data", []):
@@ -966,7 +968,7 @@ def feed_check():
 
     try:
         resp = requests.get(url, timeout=12, headers={
-            "User-Agent":"SecurityAdvisoryBot/2.0 (Feed Health Monitor)",
+            "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept":"application/rss+xml,application/atom+xml,application/xml,text/xml,*/*",
         }, allow_redirects=True)
         http_code = resp.status_code
