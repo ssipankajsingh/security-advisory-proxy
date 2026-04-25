@@ -1912,7 +1912,7 @@ def notify_critical():
             log.warning(f"[ALERT] Teams failed: {e}")
 
     # ── Email instant alert ──────────────────────────────────────────
-    if to_email and SENDGRID_KEY:
+    if to_email and SENDGRID_API_KEY:
         try:
             top5 = sorted(advisories, key=lambda a: (0 if a.get("zeroDay") else 1, 0 if a.get("severity")=="Critical" else 1))[:5]
             rows = "".join(f"""
@@ -1966,7 +1966,7 @@ def notify_critical():
                 "content": [{"type": "text/html", "value": html}]
             }
             resp = requests.post("https://api.sendgrid.com/v3/mail/send",
-                headers={"Authorization":f"Bearer {SENDGRID_KEY}","Content-Type":"application/json"},
+                headers={"Authorization":f"Bearer {SENDGRID_API_KEY}","Content-Type":"application/json"},
                 json=payload, timeout=15)
             sent["email"] = resp.status_code == 202
         except Exception as e:
@@ -2082,7 +2082,7 @@ def email_weekly():
       </div>
     </div></body></html>"""
 
-    if not SENDGRID_KEY:
+    if not SENDGRID_API_KEY:
         return jsonify({"error":"SendGrid not configured","preview":html[:500]}), 400
 
     payload = {
@@ -2093,7 +2093,7 @@ def email_weekly():
     }
     try:
         resp = requests.post("https://api.sendgrid.com/v3/mail/send",
-            headers={"Authorization":f"Bearer {SENDGRID_KEY}","Content-Type":"application/json"},
+            headers={"Authorization":f"Bearer {SENDGRID_API_KEY}","Content-Type":"application/json"},
             json=payload, timeout=15)
         if resp.status_code == 202:
             return jsonify({"success":True,"total":total,"critical":len(by_sev["Critical"]),"zero_days":len(zero_days)})
