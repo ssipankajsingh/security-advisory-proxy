@@ -165,9 +165,9 @@ def supa_save_advisory_cache(advisories:list) -> bool:
                 "fetched_at":  original_fetched,
                 "published":   (a.get("published") or now)[:50],
                 "published_at":(a.get("published") or now)[:50],
-                "severity":    a.get("severity","Unknown")[:20],
-                "source":      a.get("source","")[:50],
-                "cve_id":      a.get("cve","")[:50],
+                "severity":    (a.get("severity") or "Unknown")[:20],
+                "source":      (a.get("source") or "")[:50],
+                "cve_id":      (a.get("cve") or "")[:50],
                 "cvss":        a.get("cvss"),
                 "epss":        a.get("epss"),
                 "is_kev":      is_kev_item,
@@ -765,8 +765,9 @@ def normalise_entry(entry, source:str) -> dict:
     if not published: published = datetime.now(timezone.utc).isoformat()
 
     # ── Drop items outside the fetch window ──────────────────────────────────
+    # Note: use ZERO_DAY_SOURCES directly here — is_zero_src not yet assigned
     _is_kev_src = source in ("cisa_kev","CISA KEV","vulncheck_kev")
-    _is_zd_src  = source in ZERO_DAY_SOURCES or is_zero_src
+    _is_zd_src  = source in ZERO_DAY_SOURCES
     if not is_within_window(published, is_kev=_is_kev_src, is_zero_day=_is_zd_src):
         return None
 
@@ -1009,6 +1010,8 @@ def fetch_ghsa() -> list:
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
+                **( {"Authorization": f"Bearer {os.getenv('GITHUB_TOKEN','')}"}
+                    if os.getenv("GITHUB_TOKEN") else {} ),
             }
         )
         resp.raise_for_status()
@@ -1304,7 +1307,13 @@ def fetch_vulncheck_nvd() -> list:
         log.info(f"[vulncheck_nvd] ✅ {len(items)} items (VulnCheck NVD++)")
         return items
     except Exception as e:
-        log.error(f"[vulncheck_nvd] Failed: {e}")
+        msg = str(e)
+        if "402" in msg or "Payment" in msg:
+            log.warning("[vulncheck_nvd] 402 Payment Required — free API key needed: https://vulncheck.com/community")
+        elif "400" in msg:
+            log.warning(f"[vulncheck_nvd] 400 Bad Request — check API params: {e}")
+        else:
+            log.error(f"[vulncheck_nvd] Failed: {e}")
         return []
 
 
@@ -1384,7 +1393,13 @@ def fetch_vulncheck_kev() -> list:
         log.info(f"[vulncheck_kev] ✅ {len(items)} items (VulnCheck KEV)")
         return items
     except Exception as e:
-        log.error(f"[vulncheck_kev] Failed: {e}")
+        msg = str(e)
+        if "402" in msg or "Payment" in msg:
+            log.warning("[vulncheck_kev] 402 Payment Required — free API key needed: https://vulncheck.com/community")
+        elif "400" in msg:
+            log.warning(f"[vulncheck_kev] 400 Bad Request — check API params: {msg}")
+        else:
+            log.error(f"[vulncheck_kev] Failed: {e}")
         return []
 
 
@@ -1400,7 +1415,7 @@ def enrich_with_vulncheck(advisories: list) -> list:
     # Only enrich CVEs that are missing CVSS or have Unknown severity
     needs_enrichment = [
         a for a in advisories
-        if a.get("cve","").startswith("CVE-")
+        if (a.get("cve") or "").startswith("CVE-")
         and (not a.get("cvss") or a.get("severity") == "Unknown")
         and a.get("source") not in ("vulncheck_nvd","vulncheck_kev")
     ]
