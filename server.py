@@ -49,6 +49,22 @@ def supa_headers(prefer="return=representation"):
     return {"apikey":SUPABASE_KEY,"Authorization":f"Bearer {SUPABASE_KEY}",
             "Content-Type":"application/json","Prefer":prefer}
 
+def supa_record_feed_metrics(source_id:str, item_count:int, items:list,
+                              success:bool, error_msg:str="", duration_ms:int=0):
+    """Record per-source fetch metrics for Feed Health Monitor history."""
+    if not (SUPABASE_URL and SUPABASE_KEY): return
+    try:
+        cve_rate  = round(sum(1 for i in items if i.get("cve","").startswith("CVE-")) / max(item_count,1) * 100, 1)
+        cvss_rate = round(sum(1 for i in items if i.get("cvss")) / max(item_count,1) * 100, 1)
+        payload = {"source_id":source_id,"item_count":item_count,"cve_rate":cve_rate,
+                   "cvss_rate":cvss_rate,"success":success,
+                   "error_msg":error_msg[:200] if error_msg else None,"duration_ms":duration_ms}
+        requests.post(f"{SUPABASE_URL}/rest/v1/feed_metrics",
+                     headers={**supa_headers(),"Prefer":"return=minimal"},
+                     json=payload, timeout=5)
+    except Exception as e:
+        log.debug(f"[feed_metrics] {e}")
+
 def supa_get_acks() -> dict:
     if not (SUPABASE_URL and SUPABASE_KEY): return {}
     try:
@@ -65,21 +81,36 @@ def supa_get_acks() -> dict:
     except Exception as e: log.error(f"[SUPABASE] get_acks: {e}")
     return {}
 
-def supa_set_ack(advisory_id:str, by:str, note:str="", status:str="In Review", assigned_to:str="", ai_triage:str="") -> bool:
+def _record_history(advisory_id:str, cve_id:str, severity:str, from_status:str,
+                    to_status:str, changed_by:str, note:str, assigned_to:str):
+    """Write audit trail row to advisory_history."""
+    if not (SUPABASE_URL and SUPABASE_KEY): return
+    try:
+        requests.post(f"{SUPABASE_URL}/rest/v1/advisory_history",
+            headers={**supa_headers(),"Prefer":"return=minimal"},
+            json={"advisory_id":advisory_id,"cve_id":cve_id or None,
+                  "severity":severity or None,"from_status":from_status or None,
+                  "to_status":to_status,"changed_by":changed_by,
+                  "note":note or None,"assigned_to":assigned_to or None},
+            timeout=5)
+    except Exception as e: log.debug(f"[advisory_history] {e}")
+
+def supa_set_ack(advisory_id:str, by:str, note:str="", status:str="In Review",
+                 assigned_to:str="", ai_triage:str="", prev_status:str="",
+                 cve_id:str="", severity:str="") -> bool:
     if not (SUPABASE_URL and SUPABASE_KEY): return False
     try:
         h = {**supa_headers(),"Prefer":"resolution=merge-duplicates,return=representation"}
-        payload = {
-            "id":              advisory_id,
-            "acknowledged_by": by,
-            "acknowledged_at": datetime.now(timezone.utc).isoformat(),
-            "note":            note,
-            "status":          status,
-            "assigned_to":     assigned_to,
-            "ai_triage":       ai_triage,
-        }
+        payload = {"id":advisory_id,"acknowledged_by":by,
+                   "acknowledged_at":datetime.now(timezone.utc).isoformat(),
+                   "note":note,"status":status,"assigned_to":assigned_to,"ai_triage":ai_triage}
         r = requests.post(f"{SUPABASE_URL}/rest/v1/acknowledgments", headers=h, json=payload, timeout=8)
-        return r.status_code in (200,201)
+        ok = r.status_code in (200,201)
+        if ok and status:
+            threading.Thread(target=_record_history,
+                args=(advisory_id,cve_id,severity,prev_status,status,by,note,assigned_to),
+                daemon=True).start()
+        return ok
     except Exception as e: log.error(f"[SUPABASE] set_ack: {e}"); return False
 
 def supa_delete_ack(advisory_id:str, by:str) -> bool:
@@ -101,32 +132,46 @@ def supa_delete_ack(advisory_id:str, by:str) -> bool:
         return r.status_code in (200,204)
     except Exception as e: log.error(f"[SUPABASE] delete_ack: {e}"); return False
 
-# Retention windows: KEV/ZeroDay items kept longer — they stay exploitable
+# Retention windows — free tier has 488MB spare, ~400B/row after compression
+# Safe to extend: 90d default uses only ~0.9MB, 180d KEV uses ~1.8MB
 CACHE_RETENTION_DAYS = {
-    "kev":     90,   # CISA KEV + VulnCheck KEV — active exploits keep longer
-    "zeroday": 60,   # Zero-day items — keep 60 days
-    "critical": 45,  # Critical severity — keep 45 days
-    "default": 30,   # Everything else — 30 days
+    "kev":      180,  # CISA/VulnCheck KEV — exploited vulns stay active for months
+    "zeroday":  150,  # Zero-day — high value intel, keep 5 months
+    "critical": 120,  # Critical severity — 4 months
+    "high":      90,  # High severity — 3 months
+    "default":   90,  # Everything else — 3 months (was 30)
 }
 
 def supa_save_advisory_cache(advisories:list) -> bool:
     if not (SUPABASE_URL and SUPABASE_KEY): return False
     try:
         now = datetime.now(timezone.utc).isoformat()
+        # IMP2: strip large/derived fields before saving — cuts row 1.1KB→400B
+        STRIP_FIELDS = {"description","isNew","data_quality","exploit_refs",
+                        "epss_date","tags","author","kev_notes"}
         rows = []
         for a in advisories[:5000]:
             aid = a.get("id")
             if not aid: continue
-            # Preserve original fetched_at from first ingest (don't overwrite on re-saves)
             original_fetched = a.get("fetched_at") or now
+            is_kev_item = bool(a.get("source","") in ("CISA KEV","cisa_kev","vulncheck_kev")
+                               or "KEV" in (a.get("tags") or []))
+            compressed = {k: v for k, v in a.items() if k not in STRIP_FIELDS}
+            if compressed.get("summary"): compressed["summary"] = compressed["summary"][:300]
+            if compressed.get("title"):   compressed["title"]   = compressed["title"][:200]
             rows.append({
-                "id":         aid[:500],
-                "data":       {**a, "isNew": False},
-                "fetched_at": original_fetched,   # R2 fix: preserve original first-seen
-                "published":  (a.get("published") or now)[:50],   # store for retention decisions
-                "severity":   a.get("severity","Unknown")[:20],
-                "is_kev":     bool(a.get("source","") in ("CISA KEV","cisa_kev","vulncheck_kev") or "KEV" in (a.get("tags") or [])),
-                "is_zero_day":bool(a.get("zeroDay",False)),
+                "id":          aid[:500],
+                "data":        {**compressed, "isNew": False},
+                "fetched_at":  original_fetched,
+                "published":   (a.get("published") or now)[:50],
+                "published_at":(a.get("published") or now)[:50],
+                "severity":    a.get("severity","Unknown")[:20],
+                "source":      a.get("source","")[:50],
+                "cve_id":      a.get("cve","")[:50],
+                "cvss":        a.get("cvss"),
+                "epss":        a.get("epss"),
+                "is_kev":      is_kev_item,
+                "is_zero_day": bool(a.get("zeroDay",False)),
             })
         # Upsert: on conflict(id) only update data + severity/flags, NOT fetched_at
         # This preserves the original first-seen timestamp
@@ -158,11 +203,16 @@ def supa_save_advisory_cache(advisories:list) -> bool:
                     f"{SUPABASE_URL}/rest/v1/advisory_cache?is_zero_day=eq.true&is_kev=eq.false&published=lt.{cutoff}",
                     headers=supa_headers(), timeout=10)
 
-        # Non-KEV non-ZeroDay items: use default 30-day window
+        # Non-KEV non-ZeroDay: severity-based retention
+        for sev, days in [("Critical",CACHE_RETENTION_DAYS["critical"]),
+                          ("High",    CACHE_RETENTION_DAYS["high"])]:
+            sc = (now_dt - timedelta(days=days)).isoformat()
+            requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_cache?is_kev=eq.false&is_zero_day=eq.false&severity=eq.{sev}&published=lt.{sc}",
+                           headers=supa_headers(), timeout=10)
         default_cutoff = (now_dt - timedelta(days=CACHE_RETENTION_DAYS["default"])).isoformat()
-        requests.delete(
-            f"{SUPABASE_URL}/rest/v1/advisory_cache?is_kev=eq.false&is_zero_day=eq.false&published=lt.{default_cutoff}",
-            headers=supa_headers(), timeout=10)
+        for sev in ["Medium","Low","Unknown"]:
+            requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_cache?is_kev=eq.false&is_zero_day=eq.false&severity=eq.{sev}&published=lt.{default_cutoff}",
+                           headers=supa_headers(), timeout=10)
 
         status = f"{saved}/{len(rows)} saved"
         if failed: status += f", {failed} failed"
@@ -676,7 +726,7 @@ def is_within_window(published_str: str, is_kev: bool = False, is_zero_day: bool
         age_days = (datetime.now(timezone.utc) - pub).days
         if is_kev:      return age_days <= CACHE_RETENTION_DAYS["kev"]
         if is_zero_day: return age_days <= CACHE_RETENTION_DAYS["zeroday"]
-        return age_days <= FETCH_WINDOW_DAYS
+        return age_days <= CACHE_RETENTION_DAYS["default"]  # 90d default
     except Exception:
         return True  # If we can't parse, keep the item
 
@@ -823,6 +873,8 @@ def fetch_rss(key:str, url:str) -> list:
         if feed.bozo and not items: log.debug(f"[{key}] Bozo (XML warning, data still parsed): {feed.bozo_exception}")
         elif items: log.info(f"[{key}] ✅ {len(items)} items")
         with cache_lock: cache[key] = items
+        threading.Thread(target=supa_record_feed_metrics,
+            args=(key,len(items),items,True,"",0),daemon=True).start()
         return items
     except requests.exceptions.SSLError:
         try:
@@ -831,9 +883,15 @@ def fetch_rss(key:str, url:str) -> list:
             items = [x for x in [normalise_entry(e, key) for e in (feed.entries or [])[:50]] if x is not None]
             log.warning(f"[{key}] SSL bypass — {len(items)} items")
             with cache_lock: cache[key] = items
+            threading.Thread(target=supa_record_feed_metrics,
+                args=(key,len(items),items,True,"",0),daemon=True).start()
             return items
         except Exception as e2: log.error(f"[{key}] SSL fallback: {e2}"); return []
-    except Exception as e: log.error(f"[{key}] Failed: {e}"); return []
+    except Exception as e:
+        log.error(f"[{key}] Failed: {e}")
+        threading.Thread(target=supa_record_feed_metrics,
+            args=(key,0,[],False,str(e)[:200],0),daemon=True).start()
+        return []
 
 def fetch_mozilla_json() -> list:
     """Fetch Mozilla Security Blog via RSS (JSON endpoint deprecated)."""
