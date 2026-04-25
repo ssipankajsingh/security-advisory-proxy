@@ -95,6 +95,112 @@ def _record_history(advisory_id:str, cve_id:str, severity:str, from_status:str,
             timeout=5)
     except Exception as e: log.debug(f"[advisory_history] {e}")
 
+def _record_sla_breach(advisory_id:str, cve_id:str, severity:str, source:str,
+                        published_at:str, overdue_hours:int, assigned_to:str=""):
+    """Record SLA breach to permanent sla_audit_log table."""
+    if not (SUPABASE_URL and SUPABASE_KEY): return
+    try:
+        sla_h = {"Critical":24,"High":72,"Medium":168}.get(severity,168)
+        requests.post(f"{SUPABASE_URL}/rest/v1/sla_audit_log",
+            headers={**supa_headers(),"Prefer":"return=minimal"},
+            json={"advisory_id":advisory_id,"cve_id":cve_id or None,
+                  "severity":severity or None,"source":source or None,
+                  "published_at":published_at or None,"sla_hours":sla_h,
+                  "breached_at":datetime.now(timezone.utc).isoformat(),
+                  "overdue_hours":overdue_hours,"assigned_to":assigned_to or None},
+            timeout=5)
+    except Exception as e: log.debug(f"[sla_audit_log] {e}")
+
+def supa_save_saved_search(name:str, owner:str, filters:dict, is_shared:bool=False) -> bool:
+    if not (SUPABASE_URL and SUPABASE_KEY): return False
+    try:
+        r = requests.post(f"{SUPABASE_URL}/rest/v1/saved_searches",
+            headers={**supa_headers(),"Prefer":"return=minimal"},
+            json={"name":name,"owner":owner,"filters":filters,"is_shared":is_shared}, timeout=5)
+        return r.status_code in (200,201)
+    except Exception as e: log.debug(f"[saved_searches] {e}"); return False
+
+def supa_load_saved_searches(owner:str="") -> list:
+    if not (SUPABASE_URL and SUPABASE_KEY): return []
+    try:
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/saved_searches?select=*&order=used_at.desc&limit=50",
+                        headers=supa_headers(), timeout=8)
+        if r.status_code == 200:
+            return [row for row in r.json() if row.get("owner")==owner or row.get("is_shared")]
+    except Exception as e: log.debug(f"[saved_searches] {e}")
+    return []
+
+def supa_delete_saved_search(search_id:int) -> bool:
+    if not (SUPABASE_URL and SUPABASE_KEY): return False
+    try:
+        r = requests.delete(f"{SUPABASE_URL}/rest/v1/saved_searches?id=eq.{search_id}",
+                           headers=supa_headers(), timeout=5)
+        return r.status_code in (200,204)
+    except Exception as e: log.debug(f"[saved_searches] {e}"); return False
+
+def supa_load_archived(limit:int=200, offset:int=0, severity:str="",
+                        source:str="", days_back:int=365) -> list:
+    """Load archived advisories (90-365 days old)."""
+    if not (SUPABASE_URL and SUPABASE_KEY): return []
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days_back)).isoformat()
+        url = (f"{SUPABASE_URL}/rest/v1/advisory_cache"
+               f"?select=data,published_at,severity,source,cve_id"
+               f"&is_archived=eq.true&published_at=gte.{cutoff}"
+               f"&order=published_at.desc&limit={limit}&offset={offset}")
+        if severity: url += f"&severity=eq.{severity}"
+        if source:   url += f"&source=eq.{source}"
+        r = requests.get(url, headers=supa_headers(), timeout=15)
+        if r.status_code == 200:
+            rows = r.json()
+            return [row["data"] for row in rows if row.get("data")]
+        return []
+    except Exception as e: log.error(f"[ARCHIVE] {e}"); return []
+
+def supa_get_sla_audit(days:int=365) -> list:
+    if not (SUPABASE_URL and SUPABASE_KEY): return []
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/sla_audit_log?order=breached_at.desc&limit=500&breached_at=gte.{cutoff}",
+            headers=supa_headers(), timeout=10)
+        return r.json() if r.status_code == 200 else []
+    except Exception as e: log.debug(f"[sla_audit] {e}"); return []
+
+def supa_save_archived():
+    """
+    Nightly archive: flag rows 90-365d as is_archived=TRUE.
+    Hard-delete rows > 365d (non-KEV) or > 730d (KEV/ZeroDay).
+    """
+    if not (SUPABASE_URL and SUPABASE_KEY): return
+    try:
+        now_dt    = datetime.now(timezone.utc)
+        now_iso   = now_dt.isoformat()
+        arch_cut  = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).isoformat()
+        hard_cut  = (now_dt - timedelta(days=365)).isoformat()
+        kev_cut   = (now_dt - timedelta(days=730)).isoformat()
+        met_cut   = (now_dt - timedelta(days=90)).isoformat()
+        # Archive rows older than ARCHIVE_AFTER_DAYS
+        requests.patch(
+            f"{SUPABASE_URL}/rest/v1/advisory_cache?is_archived=eq.false&published=lt.{arch_cut}",
+            headers={**supa_headers(),"Prefer":"return=minimal"},
+            json={"is_archived":True,"archived_at":now_iso}, timeout=15)
+        # Hard delete expired non-KEV rows
+        requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_cache"
+                       f"?is_kev=eq.false&is_zero_day=eq.false&published=lt.{hard_cut}",
+                       headers=supa_headers(), timeout=10)
+        # Hard delete expired KEV rows
+        requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_cache?is_kev=eq.true&published=lt.{kev_cut}",
+                       headers=supa_headers(), timeout=10)
+        # Purge advisory_history > 365d
+        requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_history?changed_at=lt.{hard_cut}",
+                       headers=supa_headers(), timeout=10)
+        # Purge feed_metrics > 90d
+        requests.delete(f"{SUPABASE_URL}/rest/v1/feed_metrics?fetched_at=lt.{met_cut}",
+                       headers=supa_headers(), timeout=10)
+        log.info("[NIGHTLY] Archive + purge complete")
+    except Exception as e: log.error(f"[NIGHTLY] Archive failed: {e}")
+
 def supa_set_ack(advisory_id:str, by:str, note:str="", status:str="In Review",
                  assigned_to:str="", ai_triage:str="", prev_status:str="",
                  cve_id:str="", severity:str="") -> bool:
@@ -135,12 +241,13 @@ def supa_delete_ack(advisory_id:str, by:str) -> bool:
 # Retention windows — free tier has 488MB spare, ~400B/row after compression
 # Safe to extend: 90d default uses only ~0.9MB, 180d KEV uses ~1.8MB
 CACHE_RETENTION_DAYS = {
-    "kev":      180,  # CISA/VulnCheck KEV — exploited vulns stay active for months
-    "zeroday":  150,  # Zero-day — high value intel, keep 5 months
-    "critical": 120,  # Critical severity — 4 months
-    "high":      90,  # High severity — 3 months
-    "default":   90,  # Everything else — 3 months (was 30)
+    "kev":      730,  # KEV — 2 years (historically significant)
+    "zeroday":  365,  # Zero-day — 1 year
+    "critical": 365,  # Critical — 1 year
+    "high":     365,  # High — 1 year
+    "default":  365,  # All others — 1 year
 }
+ARCHIVE_AFTER_DAYS = 90  # Flag rows as archived after 90d (still queryable)
 
 def supa_save_advisory_cache(advisories:list) -> bool:
     if not (SUPABASE_URL and SUPABASE_KEY): return False
@@ -203,16 +310,16 @@ def supa_save_advisory_cache(advisories:list) -> bool:
                     f"{SUPABASE_URL}/rest/v1/advisory_cache?is_zero_day=eq.true&is_kev=eq.false&published=lt.{cutoff}",
                     headers=supa_headers(), timeout=10)
 
-        # Non-KEV non-ZeroDay: severity-based retention
-        for sev, days in [("Critical",CACHE_RETENTION_DAYS["critical"]),
-                          ("High",    CACHE_RETENTION_DAYS["high"])]:
-            sc = (now_dt - timedelta(days=days)).isoformat()
-            requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_cache?is_kev=eq.false&is_zero_day=eq.false&severity=eq.{sev}&published=lt.{sc}",
-                           headers=supa_headers(), timeout=10)
-        default_cutoff = (now_dt - timedelta(days=CACHE_RETENTION_DAYS["default"])).isoformat()
-        for sev in ["Medium","Low","Unknown"]:
-            requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_cache?is_kev=eq.false&is_zero_day=eq.false&severity=eq.{sev}&published=lt.{default_cutoff}",
-                           headers=supa_headers(), timeout=10)
+        # Archive rows older than ARCHIVE_AFTER_DAYS
+        archive_cutoff = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).isoformat()
+        requests.patch(
+            f"{SUPABASE_URL}/rest/v1/advisory_cache?is_archived=eq.false&published=lt.{archive_cutoff}",
+            headers={**supa_headers(),"Prefer":"return=minimal"},
+            json={"is_archived":True,"archived_at":now}, timeout=10)
+        # Hard-delete rows older than 365d
+        hard_cutoff = (now_dt - timedelta(days=365)).isoformat()
+        requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_cache?is_kev=eq.false&is_zero_day=eq.false&published=lt.{hard_cutoff}",
+                       headers=supa_headers(), timeout=10)
 
         status = f"{saved}/{len(rows)} saved"
         if failed: status += f", {failed} failed"
@@ -234,7 +341,8 @@ def supa_load_advisory_cache() -> list:
     while True:
         try:
             url = (f"{SUPABASE_URL}/rest/v1/advisory_cache"
-                   f"?select=data&order=fetched_at.desc&limit={chunk}&offset={offset}")
+                   f"?select=data&is_archived=eq.false"
+                   f"&order=fetched_at.desc&limit={chunk}&offset={offset}")
             r = requests.get(url, headers=supa_headers(), timeout=15)
             if r.status_code != 200:
                 log.warning(f"[SUPABASE] load_cache page offset={offset}: HTTP {r.status_code}")
@@ -1559,6 +1667,42 @@ def auth_verify():
     if valid: return jsonify({"valid":True,"success":True})
     return jsonify({"valid":False,"success":False,"error":"Invalid access code"}), 401
 
+@app.route("/saved-searches", methods=["GET"])
+@require_auth
+def get_saved_searches():
+    owner = request.args.get("owner","")
+    return jsonify({"searches": supa_load_saved_searches(owner)})
+
+@app.route("/saved-searches", methods=["POST"])
+@require_auth
+def create_saved_search():
+    data = request.get_json() or {}
+    ok = supa_save_saved_search(data.get("name","Untitled"),data.get("owner",""),
+                                 data.get("filters",{}),data.get("is_shared",False))
+    return jsonify({"success":ok})
+
+@app.route("/saved-searches/<int:sid>", methods=["DELETE"])
+@require_auth
+def delete_saved_search(sid):
+    return jsonify({"success":supa_delete_saved_search(sid)})
+
+@app.route("/archive")
+@require_auth
+def get_archive():
+    items = supa_load_archived(
+        limit    = int(request.args.get("limit",200)),
+        offset   = int(request.args.get("offset",0)),
+        severity = request.args.get("severity",""),
+        source   = request.args.get("source",""),
+        days_back= int(request.args.get("days",365)))
+    return jsonify({"total":len(items),"advisories":items,"source":"archive"})
+
+@app.route("/sla-audit")
+@require_auth
+def get_sla_audit():
+    rows = supa_get_sla_audit(int(request.args.get("days",365)))
+    return jsonify({"total":len(rows),"breaches":rows})
+
 @app.route("/db-health")
 @require_auth
 def db_health():
@@ -2553,6 +2697,7 @@ scheduler.add_job(scheduled_morning,      "cron", hour=2,  minute=30)   # 08:00 
 scheduler.add_job(scheduled_teams,        "cron", hour=2,  minute=35)   # 08:05 IST — Teams morning card
 scheduler.add_job(scheduled_patch_tuesday,"cron", hour=3,  minute=0)    # 08:30 IST — Patch Tuesday check
 scheduler.add_job(supa_purge_old_acks,    "cron", hour=0,  minute=0)    # 00:00 UTC — purge old acks
+scheduler.add_job(supa_save_archived,     "cron", hour=1,  minute=0)    # 01:00 UTC — nightly archive + purge
 scheduler.add_job(scheduled_handover,     "cron", hour=14, minute=30)   # 20:00 IST — evening handover
 # cron-job.org is primary fetch trigger — internal disabled to prevent double alerts:
 # scheduler.add_job(_background_fetch_and_cache, "interval", minutes=30, id="background_fetch")
