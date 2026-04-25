@@ -1797,6 +1797,10 @@ def build_email_html(advisories:list) -> str:
 <p style="margin:4px 0 0;">Monitoring {SOURCE_COUNT} sources · <a href="https://ssipankajsingh.github.io/security-advisory-dashboard/" style="color:#60a5fa;">View Dashboard</a></p>
 </div></div></body></html>"""
 
+# Cooldown: prevent same CVEs being alerted more than once per 2 hours
+_notified_cves: dict = {}
+NOTIFY_COOLDOWN_SECONDS = 7200  # 2 hours
+
 @app.route("/notify/critical", methods=["POST"])
 @require_auth
 def notify_critical():
@@ -1814,6 +1818,23 @@ def notify_critical():
 
     if not advisories:
         return jsonify({"error": "No advisories provided"}), 400
+
+    # Cooldown: skip CVEs already alerted within last 2 hours
+    now_ts = datetime.now(timezone.utc).timestamp()
+    truly_new = [a for a in advisories
+                 if now_ts - _notified_cves.get(a.get("cve") or a.get("id",""), 0)
+                 > NOTIFY_COOLDOWN_SECONDS]
+    # Update cooldown timestamps for newly alerted CVEs
+    for a in truly_new:
+        _notified_cves[a.get("cve") or a.get("id","")] = now_ts
+    # Purge stale cooldown entries
+    stale = [k for k,v in _notified_cves.items() if now_ts-v > NOTIFY_COOLDOWN_SECONDS*2]
+    for k in stale: _notified_cves.pop(k, None)
+
+    if not truly_new:
+        log.info(f"[NOTIFY] {len(advisories)} items in cooldown — skipping duplicate alert")
+        return jsonify({"sent":False,"reason":"cooldown","skipped":len(advisories)}), 200
+    advisories = truly_new
 
     sent = {"teams": False, "email": False}
 
@@ -2279,25 +2300,131 @@ def _send_handover_email(report:dict):
     except Exception as e: log.error(f"[HANDOVER] Email: {e}")
 
 
+def scheduled_morning():
+    """
+    08:00 IST — Single combined morning email:
+    Daily Digest (new advisories) + Handover Report (SLA status, team workload).
+    Replaces separate scheduled_email + scheduled_handover at 08:00.
+    """
+    if not (SENDGRID_API_KEY and DIGEST_EMAIL): return
+    log.info("[CRON] Running combined morning digest + handover...")
+    try:
+        # Get handover report data
+        report = generate_handover_report(window_hours=12)
+        now_ist = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+        date_str = now_ist.strftime("%A, %d %B %Y")
+        window = report.get("window_hours", 12)
+
+        # Fetch advisories for digest section
+        advisories = load_from_supabase() or []
+        critical  = [a for a in advisories if a.get("severity") == "Critical"]
+        high      = [a for a in advisories if a.get("severity") == "High"]
+        zero_days = [a for a in advisories if a.get("zeroDay")]
+        top5 = sorted(
+            [a for a in advisories if a.get("severity") in ("Critical","High") or a.get("zeroDay")],
+            key=lambda a: (0 if a.get("zeroDay") else 1, 0 if a.get("severity")=="Critical" else 1)
+        )[:6]
+
+        # Build top advisories rows
+        top_rows = "".join(f"""<tr>
+          <td style='padding:6px 10px;border-bottom:1px solid #f5f5f5'>
+            <span style='background:{"#7c3aed" if a.get("zeroDay") else "#dc2626" if a.get("severity")=="Critical" else "#ea580c"};color:#fff;border-radius:3px;padding:1px 6px;font-size:11px;font-weight:700'>
+              {"0-DAY" if a.get("zeroDay") else a.get("severity","?")}
+            </span>
+          </td>
+          <td style='padding:6px 10px;border-bottom:1px solid #f5f5f5;font-weight:600;font-size:12px'>{a.get("cve") or a.get("id","")[:40]}</td>
+          <td style='padding:6px 10px;border-bottom:1px solid #f5f5f5;color:#555;font-size:12px'>{(a.get("title",""))[:65]}</td>
+          <td style='padding:6px 10px;border-bottom:1px solid #f5f5f5;color:#888;font-size:11px'>{a.get("source","")}</td>
+        </tr>""" for a in top5)
+
+        # Build SLA overdue rows
+        overdue_rows = "".join(f"""<tr>
+          <td style='padding:5px 10px;border-bottom:1px solid #f5f5f5;font-size:12px'>{(a.get("title") or a.get("id",""))[:60]}</td>
+          <td style='padding:5px 10px;border-bottom:1px solid #f5f5f5;font-size:11px;color:#dc2626;font-weight:600'>{a.get("overdue_h",0)}h overdue</td>
+          <td style='padding:5px 10px;border-bottom:1px solid #f5f5f5;font-size:11px'>{a.get("severity","")}</td>
+        </tr>""" for a in report.get("sla_overdue_items",[]))
+
+        # Build team workload rows
+        team_rows = "".join(f"""<tr>
+          <td style='padding:5px 10px;font-size:12px'>👤 {m}</td>
+          <td style='padding:5px 10px;font-size:12px;font-weight:600'>{cnt} open</td>
+        </tr>""" for m, cnt in report.get("team_load",{}).items())
+
+        has_urgent = report.get("sla_overdue",0) > 0 or report.get("new_critical",0) > 0
+        subject = (f"🚨 [URGENT] {len(zero_days)} Zero-Day(s) — Security Advisory Digest {now_ist.strftime('%d/%m/%Y')}"
+                   if zero_days else
+                   f"🔴 Security Advisory Digest — {len(critical)} Critical · {date_str}")
+
+        html = f"""<!DOCTYPE html><html><body style='font-family:Inter,Arial,sans-serif;background:#f5f5f5;padding:20px;margin:0'>
+<div style='max-width:680px;margin:0 auto;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08)'>
+
+  <!-- Header -->
+  <div style='background:linear-gradient(135deg,#0a1e50,#1a3a7a);padding:22px 28px'>
+    <h1 style='color:#fff;margin:0;font-size:20px'>🛡 Security Advisory Daily Digest</h1>
+    <p style='color:rgba(255,255,255,0.7);margin:5px 0 0;font-size:13px'>Concentrix Endpoint Security — {date_str}</p>
+  </div>
+
+  <!-- Today's Stats -->
+  <table width='100%' style='border-collapse:collapse;background:#f8f9fa'>
+    <tr>
+      <td align='center' style='padding:16px 8px'><div style='font-size:28px;font-weight:700'>{len(advisories)}</div><div style='font-size:11px;color:#888;margin-top:2px'>Total</div></td>
+      <td align='center' style='padding:16px 8px'><div style='font-size:28px;font-weight:700;color:#dc2626'>{len(critical)}</div><div style='font-size:11px;color:#888;margin-top:2px'>Critical</div></td>
+      <td align='center' style='padding:16px 8px'><div style='font-size:28px;font-weight:700;color:#ea580c'>{len(high)}</div><div style='font-size:11px;color:#888;margin-top:2px'>High</div></td>
+      <td align='center' style='padding:16px 8px'><div style='font-size:28px;font-weight:700;color:#7c3aed'>{len(zero_days)}</div><div style='font-size:11px;color:#888;margin-top:2px'>Zero-Days</div></td>
+      <td align='center' style='padding:16px 8px'><div style='font-size:28px;font-weight:700;{"color:#dc2626" if report.get("sla_overdue",0) else "color:#16a34a"}'>{report.get("sla_overdue",0)}</div><div style='font-size:11px;color:#888;margin-top:2px'>SLA Overdue</div></td>
+    </tr>
+  </table>
+
+  <!-- Last 12h Activity -->
+  <div style='padding:16px 24px 8px;border-top:1px solid #f0f0f0'>
+    <h3 style='font-size:13px;margin:0 0 8px;color:#444'>📊 Last {window}h Activity</h3>
+    <table width='100%' style='border-collapse:collapse;font-size:12px'>
+      <tr><td style='padding:3px 0;color:#888'>New advisories</td><td style='padding:3px 0;font-weight:600'>{report.get("new_total",0)}</td>
+          <td style='padding:3px 0;color:#888'>New Critical/0-Day</td><td style='padding:3px 0;font-weight:600;color:#dc2626'>{report.get("new_critical",0)}</td></tr>
+      <tr><td style='padding:3px 0;color:#888'>Actioned by team</td><td style='padding:3px 0;font-weight:600;color:#16a34a'>{report.get("actioned",0)}</td>
+          <td style='padding:3px 0;color:#888'>Patched/Closed</td><td style='padding:3px 0;font-weight:600;color:#16a34a'>{report.get("patched",0)}</td></tr>
+    </table>
+  </div>
+
+  {"<!-- Top Advisories --><div style='padding:8px 24px 12px'><h3 style='font-size:13px;margin:0 0 8px;color:#444'>🔴 Top Critical / Zero-Day</h3><table width=100% style=border-collapse:collapse><thead><tr style=background:#f8f8f8><th style=padding:7px 10px;text-align:left;color:#888;font-size:11px>Sev</th><th style=padding:7px 10px;text-align:left;color:#888;font-size:11px>CVE</th><th style=padding:7px 10px;text-align:left;color:#888;font-size:11px>Title</th><th style=padding:7px 10px;text-align:left;color:#888;font-size:11px>Source</th></tr></thead><tbody>" + top_rows + "</tbody></table></div>" if top_rows else ""}
+
+  {"<!-- SLA Overdue --><div style='padding:8px 24px 12px;background:#fff8f8'><h3 style='font-size:13px;margin:0 0 8px;color:#dc2626'>⏰ SLA Overdue — Immediate Action Required</h3><table width=100% style=border-collapse:collapse>" + overdue_rows + "</table></div>" if overdue_rows else ""}
+
+  {"<!-- Team Workload --><div style='padding:8px 24px 12px'><h3 style='font-size:13px;margin:0 0 8px;color:#444'>👥 Team Open Workload</h3><table width=100%>" + team_rows + "</table></div>" if team_rows else ""}
+
+  <!-- CTA -->
+  <div style='padding:20px 24px;text-align:center;border-top:1px solid #f0f0f0'>
+    <a href='https://ssipankajsingh.github.io/security-advisory-dashboard/' style='background:#c0392b;color:#fff;padding:11px 28px;border-radius:6px;text-decoration:none;font-weight:600;font-size:13px'>Open Dashboard →</a>
+  </div>
+  <div style='background:#f8f8f8;padding:10px 24px;text-align:center;font-size:11px;color:#aaa'>
+    Concentrix GSE · Security Advisory Platform · {now_ist.strftime("%d %b %Y %I:%M %p IST")}
+  </div>
+</div></body></html>"""
+
+        import sendgrid as sg_module
+        client = sg_module.SendGridAPIClient(api_key=SENDGRID_API_KEY)
+        msg = Mail(from_email=SENDER_EMAIL or "soc@concentrix.com",
+                   to_emails=DIGEST_EMAIL, subject=subject, html_content=html)
+        client.send(msg)
+        log.info(f"[CRON] Morning digest sent: {len(advisories)} total, {len(critical)} critical, {report.get('sla_overdue',0)} overdue")
+    except Exception as e:
+        log.error(f"[CRON] Morning digest: {e}")
+
+
 def scheduled_handover():
-    """Shift handover report — runs at 08:00 IST and 20:00 IST."""
-    log.info("[CRON] Running handover report...")
+    """20:00 IST — Evening handover only (Teams card + email)."""
+    log.info("[CRON] Running evening handover report...")
     try:
         report = generate_handover_report(window_hours=12)
         if TEAMS_WEBHOOK: send_handover_teams_card(TEAMS_WEBHOOK, report)
         if SENDGRID_API_KEY and DIGEST_EMAIL: _send_handover_email(report)
-        log.info(f"[CRON] Handover done: {report.get('new_total',0)} new, {report.get('sla_overdue',0)} overdue")
-    except Exception as e: log.error(f"[CRON] Handover: {e}")
+        log.info(f"[CRON] Evening handover done: {report.get('new_total',0)} new, {report.get('sla_overdue',0)} overdue")
+    except Exception as e: log.error(f"[CRON] Evening handover: {e}")
 
 
 def scheduled_email():
-    if not (SENDGRID_API_KEY and DIGEST_EMAIL): return
-    log.info("[CRON] Running email digest...")
-    try:
-        with app.test_client() as client:
-            client.post("/email-digest", json={"to":DIGEST_EMAIL}, headers={"x-access-code":ACCESS_CODE})
-        log.info("[CRON] Email sent")
-    except Exception as e: log.error(f"[CRON] Email: {e}")
+    """Kept for backward compatibility — now calls scheduled_morning."""
+    scheduled_morning()
 
 def scheduled_teams():
     if not TEAMS_WEBHOOK: return
@@ -2385,14 +2512,17 @@ def fetch_now():
 
 
 scheduler = BackgroundScheduler(timezone="UTC")
-scheduler.add_job(scheduled_email,         "cron", hour=2,  minute=30)   # 8:00 AM IST
-scheduler.add_job(scheduled_teams,         "cron", hour=2,  minute=35)   # 8:05 AM IST
-scheduler.add_job(scheduled_patch_tuesday, "cron", hour=3,  minute=0)    # 8:30 AM IST on Patch Tuesdays
-scheduler.add_job(supa_purge_old_acks,     "cron", hour=0,  minute=0)    # Midnight UTC — purge old acks
-scheduler.add_job(_background_fetch_and_cache, "interval", minutes=30,  # Fallback: internal 30-min fetch
-                  id="background_fetch", replace_existing=True)          # (cron-job.org is primary trigger)
-scheduler.add_job(scheduled_handover, "cron", hour=2,  minute=30)   # 08:00 IST morning handover
-scheduler.add_job(scheduled_handover, "cron", hour=14, minute=30)   # 20:00 IST evening handover
+# ── Email schedule (IST) ────────────────────────────────────────────────────
+# 08:00 IST → 1 combined email: Daily Digest + Morning Handover (merged)
+# 08:05 IST → Teams notification
+# 20:00 IST → Evening Handover (Teams + email)
+scheduler.add_job(scheduled_morning,      "cron", hour=2,  minute=30)   # 08:00 IST — combined digest+handover
+scheduler.add_job(scheduled_teams,        "cron", hour=2,  minute=35)   # 08:05 IST — Teams morning card
+scheduler.add_job(scheduled_patch_tuesday,"cron", hour=3,  minute=0)    # 08:30 IST — Patch Tuesday check
+scheduler.add_job(supa_purge_old_acks,    "cron", hour=0,  minute=0)    # 00:00 UTC — purge old acks
+scheduler.add_job(scheduled_handover,     "cron", hour=14, minute=30)   # 20:00 IST — evening handover
+# cron-job.org is primary fetch trigger — internal disabled to prevent double alerts:
+# scheduler.add_job(_background_fetch_and_cache, "interval", minutes=30, id="background_fetch")
 scheduler.start()
 
 if __name__ == "__main__":
