@@ -101,23 +101,79 @@ def supa_delete_ack(advisory_id:str, by:str) -> bool:
         return r.status_code in (200,204)
     except Exception as e: log.error(f"[SUPABASE] delete_ack: {e}"); return False
 
+# Retention windows: KEV/ZeroDay items kept longer — they stay exploitable
+CACHE_RETENTION_DAYS = {
+    "kev":     90,   # CISA KEV + VulnCheck KEV — active exploits keep longer
+    "zeroday": 60,   # Zero-day items — keep 60 days
+    "critical": 45,  # Critical severity — keep 45 days
+    "default": 30,   # Everything else — 30 days
+}
+
 def supa_save_advisory_cache(advisories:list) -> bool:
     if not (SUPABASE_URL and SUPABASE_KEY): return False
     try:
         now = datetime.now(timezone.utc).isoformat()
-        rows = [{"id":a["id"][:500],"data":{**a,"isNew":False},"fetched_at":now} for a in advisories[:2500] if a.get("id")]
-        h = {**supa_headers(),"Prefer":"resolution=merge-duplicates"}
-        saved = 0
+        rows = []
+        for a in advisories[:5000]:
+            aid = a.get("id")
+            if not aid: continue
+            # Preserve original fetched_at from first ingest (don't overwrite on re-saves)
+            original_fetched = a.get("fetched_at") or now
+            rows.append({
+                "id":         aid[:500],
+                "data":       {**a, "isNew": False},
+                "fetched_at": original_fetched,   # R2 fix: preserve original first-seen
+                "published":  (a.get("published") or now)[:50],   # store for retention decisions
+                "severity":   a.get("severity","Unknown")[:20],
+                "is_kev":     bool(a.get("source","") in ("CISA KEV","cisa_kev","vulncheck_kev") or "KEV" in (a.get("tags") or [])),
+                "is_zero_day":bool(a.get("zeroDay",False)),
+            })
+        # Upsert: on conflict(id) only update data + severity/flags, NOT fetched_at
+        # This preserves the original first-seen timestamp
+        h = {**supa_headers(), "Prefer": "resolution=merge-duplicates"}
+        saved = 0; failed = 0
         for i in range(0, len(rows), 100):
-            r = requests.post(f"{SUPABASE_URL}/rest/v1/advisory_cache", headers=h, json=rows[i:i+100], timeout=20)
-            if r.status_code not in (200,201): log.warning(f"[SUPABASE] Cache batch {i//100} failed: {r.status_code}")
-            else: saved += len(rows[i:i+100])
-        # Purge items older than 90 days
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
-        requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_cache?fetched_at=lt.{cutoff}", headers=supa_headers(), timeout=10)
-        log.info(f"[SUPABASE] Cache saved: {saved}/{len(rows)} items")
-        return True
-    except Exception as e: log.error(f"[SUPABASE] save_cache: {e}"); return False
+            r = requests.post(f"{SUPABASE_URL}/rest/v1/advisory_cache",
+                            headers=h, json=rows[i:i+100], timeout=20)
+            if r.status_code not in (200,201):
+                log.warning(f"[SUPABASE] Cache batch {i//100} failed: {r.status_code} — {r.text[:100]}")
+                failed += len(rows[i:i+100])
+            else:
+                saved += len(rows[i:i+100])
+
+        # R2/R4 fix: retention based on published date AND advisory type
+        # KEV + ZeroDay items kept longer — they remain exploitable past 30 days
+        now_dt = datetime.now(timezone.utc)
+        for retention_type, days in [
+            ("KEV",      CACHE_RETENTION_DAYS["kev"]),
+            ("ZeroDay",  CACHE_RETENTION_DAYS["zeroday"]),
+        ]:
+            cutoff = (now_dt - timedelta(days=days)).isoformat()
+            if retention_type == "KEV":
+                requests.delete(
+                    f"{SUPABASE_URL}/rest/v1/advisory_cache?is_kev=eq.true&published=lt.{cutoff}",
+                    headers=supa_headers(), timeout=10)
+            else:
+                requests.delete(
+                    f"{SUPABASE_URL}/rest/v1/advisory_cache?is_zero_day=eq.true&is_kev=eq.false&published=lt.{cutoff}",
+                    headers=supa_headers(), timeout=10)
+
+        # Non-KEV non-ZeroDay items: use default 30-day window
+        default_cutoff = (now_dt - timedelta(days=CACHE_RETENTION_DAYS["default"])).isoformat()
+        requests.delete(
+            f"{SUPABASE_URL}/rest/v1/advisory_cache?is_kev=eq.false&is_zero_day=eq.false&published=lt.{default_cutoff}",
+            headers=supa_headers(), timeout=10)
+
+        status = f"{saved}/{len(rows)} saved"
+        if failed: status += f", {failed} failed"
+        log.info(f"[SUPABASE] Cache saved: {status}")
+        # R6 fix: warn if significant failures
+        if failed > len(rows) * 0.1:
+            log.error(f"[SUPABASE] ⚠️  >10% of cache save failed ({failed}/{len(rows)}) — data may be incomplete")
+        return failed == 0
+    except Exception as e:
+        log.error(f"[SUPABASE] save_cache: {e}")
+        return False
 
 def supa_load_advisory_cache() -> list:
     """Load all rows from advisory_cache in paginated 1000-row chunks (handles 2500+ rows)."""
@@ -143,7 +199,15 @@ def supa_load_advisory_cache() -> list:
             log.error(f"[SUPABASE] load_cache page offset={offset}: {e}")
             break
     log.info(f"[SUPABASE] Cache loaded: {len(all_items)} items (paginated, {offset+chunk} rows scanned)")
-    return all_items
+    # R7 fix: deduplicate on load — same CVE may exist from multiple sources
+    seen_ids = set(); deduped = []
+    for item in all_items:
+        iid = item.get("id","")
+        if iid and iid not in seen_ids:
+            seen_ids.add(iid); deduped.append(item)
+    if len(deduped) < len(all_items):
+        log.info(f"[SUPABASE] Deduped on load: {len(all_items)} → {len(deduped)} items")
+    return deduped
 
 def supa_get_source_config() -> dict:
     if not (SUPABASE_URL and SUPABASE_KEY): return {}
@@ -599,13 +663,20 @@ def _infer_patch_status(text: str) -> str:
     return "unknown"
 
 
-def is_within_window(published_str: str) -> bool:
-    """Return True if published date is within FETCH_WINDOW_DAYS of now."""
+def is_within_window(published_str: str, is_kev: bool = False, is_zero_day: bool = False) -> bool:
+    """
+    Return True if published date is within the retention window.
+    R4 fix: KEV and ZeroDay items use extended windows — they stay exploitable
+    long after publication and must not be dropped at 30 days.
+    """
     try:
         pub = datetime.fromisoformat(published_str.replace("Z", "+00:00"))
         if pub.tzinfo is None:
             pub = pub.replace(tzinfo=timezone.utc)
-        return (datetime.now(timezone.utc) - pub).days <= FETCH_WINDOW_DAYS
+        age_days = (datetime.now(timezone.utc) - pub).days
+        if is_kev:      return age_days <= CACHE_RETENTION_DAYS["kev"]
+        if is_zero_day: return age_days <= CACHE_RETENTION_DAYS["zeroday"]
+        return age_days <= FETCH_WINDOW_DAYS
     except Exception:
         return True  # If we can't parse, keep the item
 
@@ -644,7 +715,9 @@ def normalise_entry(entry, source:str) -> dict:
     if not published: published = datetime.now(timezone.utc).isoformat()
 
     # ── Drop items outside the fetch window ──────────────────────────────────
-    if not is_within_window(published):
+    _is_kev_src = source in ("cisa_kev","CISA KEV","vulncheck_kev")
+    _is_zd_src  = source in ZERO_DAY_SOURCES or is_zero_src
+    if not is_within_window(published, is_kev=_is_kev_src, is_zero_day=_is_zd_src):
         return None
 
     # ── Updated/Review date ───────────────────────────────────────────────
@@ -1408,6 +1481,41 @@ def auth_verify():
     if valid: return jsonify({"valid":True,"success":True})
     return jsonify({"valid":False,"success":False,"error":"Invalid access code"}), 401
 
+@app.route("/db-health")
+@require_auth
+def db_health():
+    """Database health check — shows cache state, row counts, oldest/newest items."""
+    try:
+        stats = {}
+        # advisory_cache stats
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/advisory_cache?select=id,published,severity,is_kev,is_zero_day&limit=5000",
+                        headers={**supa_headers(),"Prefer":"count=exact"}, timeout=10)
+        if r.status_code == 200:
+            rows = r.json()
+            total = int(r.headers.get("Content-Range","0").split("/")[-1]) if "Content-Range" in r.headers else len(rows)
+            published_dates = [row.get("published","") for row in rows if row.get("published")]
+            published_dates.sort()
+            stats["advisory_cache"] = {
+                "total_rows": total,
+                "oldest_published": published_dates[0] if published_dates else None,
+                "newest_published": published_dates[-1] if published_dates else None,
+                "kev_count": sum(1 for row in rows if row.get("is_kev")),
+                "zero_day_count": sum(1 for row in rows if row.get("is_zero_day")),
+                "critical_count": sum(1 for row in rows if row.get("severity") == "Critical"),
+            }
+        # acknowledgments stats
+        r2 = requests.get(f"{SUPABASE_URL}/rest/v1/acknowledgments?select=id,status&limit=1000",
+                         headers={**supa_headers(),"Prefer":"count=exact"}, timeout=10)
+        if r2.status_code == 200:
+            acks = r2.json()
+            from collections import Counter
+            status_counts = Counter(a.get("status","") for a in acks)
+            stats["acknowledgments"] = {"total": len(acks), "by_status": dict(status_counts)}
+        return jsonify({"success": True, "stats": stats, "timestamp": datetime.now(timezone.utc).isoformat()})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route("/sources")
 @require_auth
 def sources():
@@ -1424,13 +1532,19 @@ def advisories():
             if len(cached) > 50:
                 log.info(f"[ADVISORIES] Cache hit: {len(cached)} items")
                 return jsonify({"total":len(cached),"generated":datetime.now(timezone.utc).isoformat(),
-                    "advisories":cached[:2500],"source":"cache"})
+                    "advisories":cached[:5000],"source":"cache"})
         # Live fetch
         all_adv = fetch_all_advisories()
         if SUPABASE_URL and all_adv:
-            threading.Thread(target=supa_save_advisory_cache, args=(all_adv,), daemon=True).start()
+            def _save_with_retry(adv):
+                for attempt in range(3):
+                    ok = supa_save_advisory_cache(adv)
+                    if ok: return
+                    import time as _time; _time.sleep(5 * (attempt+1))
+                log.error("[SUPABASE] ⚠️  All 3 save attempts failed — cache may be stale")
+            threading.Thread(target=_save_with_retry, args=(all_adv,), daemon=True).start()
         return jsonify({"total":len(all_adv),"generated":datetime.now(timezone.utc).isoformat(),
-            "advisories":all_adv[:2500],"source":"live"})
+            "advisories":all_adv[:5000],"source":"live"})
     except Exception as e:
         log.error(f"[ADVISORIES] {e}")
         return jsonify({"error":"Failed to fetch advisories"}), 500
