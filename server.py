@@ -1227,10 +1227,11 @@ def fetch_vulncheck_nvd() -> list:
             "https://api.vulncheck.com/v3/index/vulncheck-nvd2",
             params={"pubStartDate": since, "resultsPerPage": 100},
             headers={
-                "Authorization": f"Bearer {VULNCHECK_API_KEY}",
                 "Accept": "application/json",
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Authorization": f"Bearer {VULNCHECK_API_KEY}",
             },
+            cookies={"token": VULNCHECK_API_KEY},
             timeout=20
         )
         resp.raise_for_status()
@@ -1334,10 +1335,11 @@ def fetch_vulncheck_kev() -> list:
             "https://api.vulncheck.com/v3/index/vulncheck-kev",
             params={"limit": 100},
             headers={
-                "Authorization": f"Bearer {VULNCHECK_API_KEY}",
                 "Accept": "application/json",
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Authorization": f"Bearer {VULNCHECK_API_KEY}",
             },
+            cookies={"token": VULNCHECK_API_KEY},
             timeout=20
         )
         resp.raise_for_status()
@@ -1433,10 +1435,11 @@ def enrich_with_vulncheck(advisories: list) -> list:
                 f"https://api.vulncheck.com/v3/index/vulncheck-nvd2",
                 params={"cve": cve_id},
                 headers={
-                    "Authorization": f"Bearer {VULNCHECK_API_KEY}",
                     "Accept": "application/json",
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    "Authorization": f"Bearer {VULNCHECK_API_KEY}",
                 },
+                cookies={"token": VULNCHECK_API_KEY},
                 timeout=8
             )
             if r.status_code == 200:
