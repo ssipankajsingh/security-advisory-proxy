@@ -176,7 +176,7 @@ TRUSTED_FEEDS = {
     # ══ TIER 0: MASTER AGGREGATORS ═══════════════════════════════════════════
     "cvefeed_all":           "https://cvefeed.io/rssfeed/",
     "cvefeed_high_critical": "https://cvefeed.io/rssfeed/severity/high.xml",
-    "github_advisories":     "https://github.com/security-advisories/feed.atom",
+    "github_advisories":     "https://github.com/advisories.atom",
     "cvedaily_all":          "https://cvedaily.com/feed.xml",
     "cvedaily_new":          "https://cvedaily.com/feed-new.xml",
     "cvedaily_critical":     "https://cvedaily.com/feed-critical.xml",
@@ -207,7 +207,7 @@ TRUSTED_FEEDS = {
     "apple":        "https://support.apple.com/en-in/rss/securityupdates.rss",
     "ubuntu":       "https://ubuntu.com/security/notices/rss.xml",
     "android":      "https://security.googleblog.com/feeds/posts/default",
-    "redhat":       "https://access.redhat.com/feeds/latest-errata.rss",
+    "redhat":       "https://access.redhat.com/security/security-updates/security-advisories.rss",
     "debian":       "https://www.debian.org/security/dsa-long",
     "docker":       "https://www.docker.com/blog/category/security/feed/",
 
@@ -229,9 +229,9 @@ TRUSTED_FEEDS = {
     "crowdstrike":            "https://www.crowdstrike.com/blog/feed/",
     "crowdstrike_blog":       "https://www.crowdstrike.com/blog/feed/",
     "sentinelone":            "https://www.sentinelone.com/labs/feed/",
-    "sophos":                 "https://news.sophos.com/en-us/feed/",
-    "trendmicro":             "https://feeds.trendmicro.com/TrendMicroSimplySecurity",
-    "trellix":                "https://www.trellix.com/blogs/feed/",
+    "sophos":                 "https://news.sophos.com/en-us/category/threat-research/feed/",
+    "trendmicro":             "https://www.trendmicro.com/en_us/research.rss",
+    "trellix":                "https://www.trellix.com/en-us/threat-center/threat-intelligence-reports.html",
     "malwarebytes":           "https://www.malwarebytes.com/blog/feed/",
     "eset":                   "https://www.welivesecurity.com/feed/",
 
@@ -241,24 +241,24 @@ TRUSTED_FEEDS = {
     "chrome":       "https://chromereleases.googleblog.com/feeds/posts/default",
     "project_zero": "https://googleprojectzero.blogspot.com/feeds/posts/default",
     "cloudflare":   "https://blog.cloudflare.com/tag/security/rss/",
-    "okta":         "https://trust.okta.com/feed/",
+    "okta":         "https://sec.okta.com/articles.rss",
 
     # ══ MIDDLEWARE / DB ═══════════════════════════════════════════════════════
     "mozilla":      "https://blog.mozilla.org/security/feed/",
-    "openssl":      "https://openssl.org/news/feed.atom",
+    "openssl":      "https://openssl.org/news/secadv.rss",
     "apache":       "https://blogs.apache.org/security/feed/entries/rss",
     "oracle":       "https://www.kb.cert.org/vuls/atomfeed/",
-    "vmware":       "https://support.broadcom.com/rss/security-advisory.rss",
+    "vmware":       "https://www.vmware.com/security/advisories.rss",
     "splunk":       "https://advisory.splunk.com/feed.xml",
     "veeam":        "https://www.veeam.com/rss/security-advisories.xml",
-    "nginx":        "https://nginx.org/en/CHANGES.rss",
+    "nginx":        "https://nginx.org/en/security_advisories.html",
 
     # ══ YOUR STACK ═══════════════════════════════════════════════════════════
     "cortex_xdr":   "https://security.paloaltonetworks.com/rss.xml",
     "netskope":     "https://www.netskope.com/blog/feed",
     "proofpoint":   "https://www.proofpoint.com/us/rss.xml",
     "solarwinds":   "https://www.solarwinds.com/shared-content/rss-feed/solarwinds-cve-rss-feed.xml",
-    "forescout":    "https://www.forescout.com/blog/feed/",
+    "forescout":    "https://www.forescout.com/company/resources/feed/?type=research",
 
     # ══ THREAT INTEL ══════════════════════════════════════════════════════════
     "mandiant":     "https://www.mandiant.com/resources/blog/rss.xml",
@@ -706,7 +706,7 @@ def fetch_rss(key:str, url:str) -> list:
         resp.raise_for_status()
         feed  = feedparser.parse(resp.content)
         items = [x for x in [normalise_entry(e, key) for e in (feed.entries or [])[:50]] if x is not None]
-        if feed.bozo and not items: log.warning(f"[{key}] Bozo: {feed.bozo_exception}")
+        if feed.bozo and not items: log.debug(f"[{key}] Bozo (XML warning, data still parsed): {feed.bozo_exception}")
         elif items: log.info(f"[{key}] ✅ {len(items)} items")
         with cache_lock: cache[key] = items
         return items
@@ -722,31 +722,21 @@ def fetch_rss(key:str, url:str) -> list:
     except Exception as e: log.error(f"[{key}] Failed: {e}"); return []
 
 def fetch_mozilla_json() -> list:
+    """Fetch Mozilla Security Blog via RSS (JSON endpoint deprecated)."""
     with cache_lock:
         if "mozilla" in cache: return cache["mozilla"]
     try:
-        resp = requests.get("https://blog.mozilla.org/security/feed/",
-                            timeout=15, headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"})
-        resp.raise_for_status()
-        data = resp.json()
-        items = []
-        for entry in (data if isinstance(data,list) else data.get("advisories",[]))[:50]:
-            title = entry.get("title") or entry.get("id") or ""
-            link  = entry.get("url") or entry.get("link") or "https://www.mozilla.org/security/advisories/"
-            desc  = entry.get("description") or entry.get("impact") or ""
-            combined = f"{title} {desc}"
-            items.append({"id":link,"title":title[:200],"summary":desc[:600],"description":desc,"link":link,
-                "published":entry.get("announced") or datetime.now(timezone.utc).isoformat(),
-                "severity":parse_severity(combined),"cvss":extract_cvss_v3(combined),
-                "cve":extract_cve(combined),"cves":extract_all_cves(combined),
-                "zeroDay":is_zero_day(combined),"source":"mozilla","vendor":"Mozilla","url":link,
-                "products":[],"author":"","tags":[],"isOEM":True,
-                "fetched_at":datetime.now(timezone.utc).isoformat()})
-        items = [i for i in items if is_within_window(i.get("published",""))]
+        feed = feedparser.parse("https://blog.mozilla.org/security/feed/")
+        items = [normalise_entry(e, "mozilla") for e in (feed.entries or [])[:50]]
+        items = [i for i in items if i is not None and is_within_window(i.get("published",""))]
+        # Mark as OEM
+        for i in items: i["isOEM"] = True
         with cache_lock: cache["mozilla"] = items
-        log.info(f"[mozilla] ✅ {len(items)} items (JSON)")
+        log.info(f"[mozilla] ✅ {len(items)} items (RSS)")
         return items
-    except Exception as e: log.error(f"[mozilla] JSON failed: {e}"); return []
+    except Exception as e:
+        log.error(f"[mozilla] RSS failed: {e}")
+        return []
 
 def fetch_cisa_kev() -> list:
     with cache_lock:
