@@ -1309,7 +1309,26 @@ def enrich_with_epss(advisories:list) -> list:
 
     enriched = len(epss_map)
     log.info(f"[EPSS] Enriched {enriched}/{len(cve_ids)} CVEs with EPSS scores")
+    threading.Thread(target=_update_cve_context_cache,args=(advisories,),daemon=True).start()
     return advisories
+
+
+def _update_cve_context_cache(advisories:list):
+    """Upsert per-CVE EPSS+context to cve_context_cache after every enrichment."""
+    if not (SUPABASE_URL and SUPABASE_KEY): return
+    try:
+        rows=[{"cve_id":(a.get("cve") or "").strip(),"epss_score":a.get("epss"),
+               "epss_pct":a.get("epss_pct"),"patch_status":a.get("patch_status","unknown"),
+               "exploit_count":1 if a.get("source") in ("exploit_db","zdi_published","zdi_upcoming") else 0,
+               "updated_at":datetime.now(timezone.utc).isoformat()}
+              for a in advisories
+              if (a.get("cve") or "").startswith("CVE-") and (a.get("epss") or a.get("cwe"))]
+        if not rows: return
+        h={**supa_headers(),"Prefer":"resolution=merge-duplicates,return=minimal"}
+        for i in range(0,len(rows),100):
+            requests.post(f"{SUPABASE_URL}/rest/v1/cve_context_cache",headers=h,json=rows[i:i+100],timeout=10)
+        log.debug(f"[CVE_CTX] Upserted {len(rows)} records")
+    except Exception as e: log.debug(f"[CVE_CTX] {e}")
 
 def fetch_ghsa() -> list:
     """
@@ -1909,11 +1928,39 @@ def get_archive():
         days_back= int(request.args.get("days",365)))
     return jsonify({"total":len(items),"advisories":items,"source":"archive"})
 
+@app.route("/cve-context/<cve_id>")
+@require_auth
+def get_cve_context(cve_id:str):
+    if not (SUPABASE_URL and SUPABASE_KEY): return jsonify({"context":None})
+    try:
+        r=requests.get(f"{SUPABASE_URL}/rest/v1/cve_context_cache?cve_id=eq.{cve_id}&select=*",
+                      headers=supa_headers(),timeout=8)
+        if r.status_code==200 and r.json(): return jsonify({"context":r.json()[0]})
+        return jsonify({"context":None})
+    except Exception as e: return jsonify({"error":str(e)}),500
+
+
 @app.route("/sla-audit")
 @require_auth
 def get_sla_audit():
     rows = supa_get_sla_audit(int(request.args.get("days",365)))
     return jsonify({"total":len(rows),"breaches":rows})
+
+@app.route("/feed-metrics-history")
+@require_auth
+def feed_metrics_history():
+    """Return last 7 days of feed_metrics for sparklines in Feed Health Monitor."""
+    if not (SUPABASE_URL and SUPABASE_KEY): return jsonify({"metrics":[]})
+    try:
+        cutoff=(datetime.now(timezone.utc)-timedelta(days=7)).isoformat()
+        r=requests.get(
+            f"{SUPABASE_URL}/rest/v1/feed_metrics?select=source_id,fetched_at,item_count,success"
+            f"&fetched_at=gte.{cutoff}&order=fetched_at.desc&limit=5000",
+            headers=supa_headers(),timeout=10)
+        if r.status_code==200: return jsonify({"metrics":r.json()})
+        return jsonify({"metrics":[]})
+    except Exception as e: return jsonify({"error":str(e),"metrics":[]}),500
+
 
 @app.route("/db-health")
 @require_auth
@@ -2026,6 +2073,17 @@ def set_ack():
     log.info(f"[ACK] {advisory_id} by {by} → {status}" + (f" → {assigned_to}" if assigned_to else ""))
     return jsonify({"success":True,"id":advisory_id,"by":by,"at":at,"note":note,
                     "status":status,"assigned_to":assigned_to,"ai_triage":ai_triage,"persisted":ok})
+
+@app.route("/ack/bulk", methods=["POST"])
+@require_auth
+def bulk_ack():
+    """Bulk ack/status-update up to 100 advisories at once."""
+    d=request.get_json() or {}
+    ids=d.get("ids",[]); by=d.get("by",""); note=d.get("note",""); status=d.get("status","In Review")
+    if not ids or not by: return jsonify({"error":"ids and by required"}),400
+    ok=sum(1 for aid in ids[:100] if supa_set_ack(aid,by,note,status))
+    return jsonify({"success":True,"updated":ok,"total":len(ids)})
+
 
 @app.route("/ack/<path:advisory_id>", methods=["DELETE"])
 @require_auth
