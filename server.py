@@ -748,48 +748,162 @@ def _title_fingerprint(title:str) -> str:
               "security","advisory","update","patch","vulnerability","issue","fixes"}]
     return " ".join(sorted(words[:8]))  # sort so word-order differences don't matter
 
+VENDOR_NORMALISE={"microsoft corporation":"Microsoft","microsoft corp":"Microsoft","msrc":"Microsoft","cisco systems":"Cisco","cisco systems, inc.":"Cisco","google llc":"Google","google inc":"Google","apple inc":"Apple","apple inc.":"Apple","oracle corporation":"Oracle","oracle corp":"Oracle","adobe inc":"Adobe","vmware inc":"VMware","vmware, inc":"VMware","fortinet inc":"Fortinet","fortinet, inc":"Fortinet","palo alto networks":"Palo Alto Networks","check point software":"Check Point","f5 networks":"F5","f5, inc":"F5","citrix systems":"Citrix","solarwinds corporation":"SolarWinds","ivanti inc":"Ivanti","ivanti, inc":"Ivanti","red hat inc":"Red Hat","red hat, inc":"Red Hat","canonical ltd":"Canonical","apache software foundation":"Apache","the apache software foundation":"Apache","mozilla foundation":"Mozilla","mozilla corporation":"Mozilla","sap se":"SAP","siemens ag":"Siemens","schneider electric":"Schneider Electric"}
+def normalise_vendor(raw:str)->str:
+    if not raw: return raw
+    return VENDOR_NORMALISE.get(raw.strip().lower(),raw.strip())
+
+# Source priority for cross-source merge — higher number = higher trust
+# When two sources conflict on CVSS/severity, higher priority source wins
+SOURCE_PRIORITY = {
+    # OEM Direct — most authoritative for their own products
+    "msrc":12, "cisco":12, "fortinet":12, "paloalto":12, "juniper":12,
+    "ivanti":12, "vmware":12, "sap":12, "oracle":12, "adobe":12,
+    "apple":12, "android":12, "chrome":12, "mozilla":12, "solarwinds":12,
+    "checkpoint":12, "f5":12, "citrix":12, "aruba":12, "netscout":12,
+    "crowdstrike":12, "sentinelone":12, "splunk":12, "prtg":12,
+    # Government / Official
+    "cisa_kev":11,        # CISA KEV — exploited in wild confirmed
+    "vulncheck_kev":11,   # VulnCheck KEV — same tier
+    "nvd":10,             # NVD — official CVSS scores
+    "nist_nvd":10,
+    "cisa_alerts":9, "cisa_ics":9, "cert_eu":9, "cert_in":9,
+    "ghsa":9,             # GitHub Advisory — authoritative for OSS
+    "osv":8,              # Google OSV
+    "mitre_cve":8,
+    # Aggregators
+    "exploit_db":7,       # Has PoC/exploit info
+    "vulncheck_nvd":7,
+    "zdi_published":6, "zdi_upcoming":6,
+    "vuldb":5,
+    # Generic
+    "github_advisories":4,
+    "cvefeed_high_critical":3, "cvedaily_all":3, "cvedaily_critical":3,
+}
+
+def _src_priority(source:str) -> int:
+    """Return source trust priority — higher = more authoritative."""
+    return SOURCE_PRIORITY.get(source, 5)
+
+
 def dedupe_and_enrich(items:list) -> list:
     """
-    Deduplicate advisories by CVE ID, URL, or fuzzy title (for non-CVE news items).
-    OEM entries always win (sorted first). Tracks all sources that reported each CVE.
+    Cross-source CVE deduplication with intelligent field merging.
+
+    Strategy:
+    - Items pre-sorted: OEM first, then by severity, then by date
+    - Match by: CVE ID (primary), URL/ID (secondary), fuzzy title (news only)
+    - On merge: best field from highest-priority source always wins
+    - Accumulate: sources_list, cves array, tags, products across all sources
+    - KEV/ZeroDay/isOEM flags: OR-merge (if ANY source says true, result is true)
     """
-    seen_cve   = {}
-    seen_url   = {}
-    seen_title = {}  # fuzzy title fingerprint → index
+    seen_cve   = {}   # CVE-ID → out index
+    seen_url   = {}   # advisory ID/URL → out index
+    seen_title = {}   # fuzzy title fingerprint → out index (news only)
     out        = []
+
+    merged_count = 0
 
     for a in items:
         cve = (a.get("cve") or "").upper().strip()
         uid = a.get("id","").strip()
         tfp = _title_fingerprint(a.get("title","")) if not cve else ""
 
+        # ── Find match ────────────────────────────────────────────────────────
         merge_idx = None
         if cve and cve.startswith("CVE-"):
             merge_idx = seen_cve.get(cve)
         if merge_idx is None:
             merge_idx = seen_url.get(uid)
-        # Fuzzy title dedup only for non-CVE items (news/blog articles)
         if merge_idx is None and tfp and len(tfp) > 10:
             merge_idx = seen_title.get(tfp)
 
         if merge_idx is not None:
-            existing = out[merge_idx]
-            sources_list = existing.get("sources_list", [existing.get("source","")])
-            new_src = a.get("source","")
-            if new_src and new_src not in sources_list:
-                sources_list.append(new_src)
-            out[merge_idx]["sources_list"]  = sources_list
-            out[merge_idx]["source_count"]  = len(sources_list)
-            out[merge_idx]["duplicate_cve"] = True
-            if not existing.get("cvss") and a.get("cvss"):
-                out[merge_idx]["cvss"] = a["cvss"]
-            if existing.get("severity","Unknown") == "Unknown" and a.get("severity","Unknown") != "Unknown":
-                out[merge_idx]["severity"] = a["severity"]
-            if not existing.get("description") and a.get("description"):
-                out[merge_idx]["description"] = a["description"]
-            if not existing.get("patch_info") and a.get("patch_info"):
-                out[merge_idx]["patch_info"] = a["patch_info"]
+            # ── Merge into existing record ────────────────────────────────────
+            merged_count += 1
+            ex  = out[merge_idx]
+            src = a.get("source","")
+            ex_priority = _src_priority(ex.get("source",""))
+            new_priority = _src_priority(src)
+
+            # Accumulate source list
+            sl = ex.get("sources_list", [ex.get("source","")])
+            if src and src not in sl:
+                sl.append(src)
+            ex["sources_list"] = sl
+            ex["source_count"] = len(sl)
+            ex["duplicate_cve"] = True
+
+            # Accumulate CVE array (union of all CVEs from all sources)
+            all_cves = set(ex.get("cves") or ([ex["cve"]] if ex.get("cve") else []))
+            all_cves.update(a.get("cves") or ([a["cve"]] if a.get("cve") else []))
+            all_cves.discard("")
+            if all_cves:
+                ex["cves"] = sorted(all_cves)
+
+            # Accumulate tags (union)
+            ex_tags = set(ex.get("tags") or [])
+            new_tags = set(a.get("tags") or [])
+            if new_tags - ex_tags:
+                ex["tags"] = sorted(ex_tags | new_tags)
+
+            # Accumulate affected products (union, deduplicated)
+            ex_prods = ex.get("products") or []
+            new_prods = a.get("products") or []
+            merged_prods = list({p for p in (ex_prods + new_prods) if p})
+            if merged_prods:
+                ex["products"] = merged_prods[:20]  # cap at 20
+
+            # Boolean OR-merge — if ANY source confirms, it's true
+            if a.get("zeroDay"):        ex["zeroDay"]        = True
+            if a.get("isOEM"):          ex["isOEM"]          = True
+            if a.get("isKev") or a.get("source","") in ("cisa_kev","vulncheck_kev"):
+                ex["isKev"] = True
+
+            # Field quality merge — higher priority source wins on conflict
+            # Lower priority source fills gaps only
+            if new_priority >= ex_priority:
+                # Higher/equal priority: take better values
+                if a.get("cvss") and (not ex.get("cvss") or new_priority > ex_priority):
+                    ex["cvss"] = a["cvss"]
+                if a.get("severity","Unknown") not in ("Unknown","") and                    (ex.get("severity","Unknown") == "Unknown" or new_priority > ex_priority):
+                    ex["severity"] = a["severity"]
+                if a.get("description") and (not ex.get("description") or
+                   (new_priority > ex_priority and len(a["description"]) > len(ex.get("description","")))):
+                    ex["description"] = a["description"]
+                if a.get("summary") and not ex.get("summary"):
+                    ex["summary"] = a["summary"]
+                if a.get("title") and new_priority > ex_priority and len(a.get("title","")) > 10:
+                    ex["title"] = a["title"]  # higher priority source has better title
+            else:
+                # Lower priority: fill gaps only, never overwrite
+                if not ex.get("cvss")        and a.get("cvss"):        ex["cvss"]        = a["cvss"]
+                if not ex.get("description") and a.get("description"): ex["description"] = a["description"]
+                if not ex.get("summary")     and a.get("summary"):     ex["summary"]     = a["summary"]
+                if ex.get("severity","Unknown") == "Unknown" and a.get("severity","Unknown") != "Unknown":
+                    ex["severity"] = a["severity"]
+
+            # Always take KEV enrichment fields from KEV sources
+            if src in ("cisa_kev","vulncheck_kev"):
+                if a.get("required_action"): ex["required_action"] = a["required_action"]
+                if a.get("kev_due_date"):    ex["kev_due_date"]    = a["kev_due_date"]
+                if a.get("kev_notes"):       ex["kev_notes"]       = a["kev_notes"]
+
+            # Always take exploit info from Exploit-DB / ZDI
+            if src in ("exploit_db","zdi_published","zdi_upcoming"):
+                if a.get("exploit_refs"): ex["exploit_refs"] = a.get("exploit_refs","")
+
+            # Take patch status if we have none
+            if not ex.get("patch_status") or ex.get("patch_status") == "unknown":
+                if a.get("patch_status") and a["patch_status"] != "unknown":
+                    ex["patch_status"] = a["patch_status"]
+
+            # CWE: take first available
+            if not ex.get("cwe") and a.get("cwe"):
+                ex["cwe"] = a["cwe"]
+
         else:
+            # ── New record ────────────────────────────────────────────────────
             idx_new = len(out)
             a["sources_list"]  = [a.get("source","")]
             a["source_count"]  = 1
@@ -801,7 +915,8 @@ def dedupe_and_enrich(items:list) -> list:
                 seen_title[tfp] = idx_new
             out.append(a)
 
-    log.info(f"[DEDUPE] {len(items)} -> {len(out)} ({len(items)-len(out)} duplicates merged)")
+    log.info(f"[DEDUPE] {len(items)} -> {len(out)} ({merged_count} duplicates merged, "
+             f"{len(items)-len(out)} unique CVEs collapsed)")
     return out
 
 
@@ -947,7 +1062,7 @@ def normalise_entry(entry, source:str) -> dict:
         "cves":             all_cves[:10],
         "zeroDay":          zero_day,
         "source":           source,
-        "vendor":           source,
+        "vendor":           normalise_vendor(source),
         "products":         products,
         "affected_versions":affected_versions,
         "patch_info":       patch_info,
@@ -1052,6 +1167,49 @@ def fetch_cisa_kev() -> list:
         log.info(f"[cisa_kev] ✅ {len(items)} items")
         return items
     except Exception as e: log.error(f"[cisa_kev] Failed: {e}"); return []
+
+def enrich_missing_cvss_from_nvd(advisories:list)->list:
+    """Query NVD for CVEs still missing CVSS after dedup. Free API, no key. Max 30/cycle."""
+    needs=[a for a in advisories if (a.get("cve") or "").startswith("CVE-")
+           and (not a.get("cvss") or a.get("severity","Unknown")=="Unknown")
+           and not a.get("_nvd_queried")][:30]
+    if not needs: return advisories
+    log.info(f"[NVD-ENRICH] Querying {len(needs)} CVEs missing CVSS/severity")
+    adv_map={a["cve"]:a for a in advisories if a.get("cve")}
+    enriched=0
+    for a in needs:
+        cve_id=a["cve"]
+        try:
+            r=requests.get(f"https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve_id}",
+                headers={"User-Agent":"Mozilla/5.0 (compatible)"},timeout=8)
+            if r.status_code==429: log.warning("[NVD-ENRICH] Rate limited"); break
+            if r.status_code!=200: continue
+            vulns=r.json().get("vulnerabilities",[])
+            if not vulns: continue
+            cve_data=vulns[0].get("cve",{}); metrics=cve_data.get("metrics",{})
+            cvss_score=None; severity=None
+            for ver in ["cvssMetricV31","cvssMetricV30","cvssMetricV40"]:
+                if metrics.get(ver):
+                    m=metrics[ver][0].get("cvssData",{})
+                    cvss_score=m.get("baseScore"); severity=m.get("baseSeverity","").capitalize(); break
+            if not cvss_score and metrics.get("cvssMetricV2"):
+                m=metrics["cvssMetricV2"][0].get("cvssData",{}); cvss_score=m.get("baseScore")
+                severity="High" if cvss_score and cvss_score>=7 else "Medium" if cvss_score and cvss_score>=4 else "Low"
+            tgt=adv_map.get(cve_id)
+            if tgt and cvss_score:
+                if not tgt.get("cvss"):                                   tgt["cvss"]=cvss_score
+                if tgt.get("severity","Unknown")=="Unknown" and severity:  tgt["severity"]=severity
+                if not tgt.get("cwe"):
+                    for w in cve_data.get("weaknesses",[]):
+                        for d in w.get("description",[]):
+                            if d.get("value","").startswith("CWE-"):
+                                tgt["cwe"]=d["value"]; break
+                        if tgt.get("cwe"): break
+                tgt["_nvd_queried"]=True; enriched+=1
+        except Exception as e: log.debug(f"[NVD-ENRICH] {cve_id}: {e}"); continue
+        import time as _t; _t.sleep(0.65)
+    if enriched: log.info(f"[NVD-ENRICH] ✅ Enriched {enriched}/{len(needs)} CVEs from NVD")
+    return advisories
 
 def enrich_with_epss(advisories:list) -> list:
     """
@@ -1628,6 +1786,11 @@ def fetch_all_advisories() -> list:
         results = enrich_with_epss(results)
     except Exception as e:
         log.warning(f"[EPSS] Enrichment failed (non-fatal): {e}")
+    # NVD enrichment: fill CVSS + CWE gaps for remaining Unknown-severity CVEs
+    try:
+        results = enrich_missing_cvss_from_nvd(results)
+    except Exception as e:
+        log.warning(f"[NVD-ENRICH] Failed (non-fatal): {e}")
     # Enrich with VulnCheck — backfill missing CVSS + exploit intel
     try:
         results = enrich_with_vulncheck(results)
