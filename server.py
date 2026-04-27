@@ -43,6 +43,10 @@ VULNCHECK_API_KEY = os.getenv("VULNCHECK_API_KEY","")  # VulnCheck Community API
 # ─── CACHE ────────────────────────────────────────────────────────────────────
 cache      = TTLCache(maxsize=200, ttl=3600)
 cache_lock = threading.Lock()
+_feed_failures:dict = {}  # consecutive failures per source
+_feed_disabled:dict = {}  # {key: disabled_until_unix_ts}
+FEED_DISABLE_AFTER  = 10
+FEED_RETRY_AFTER_H  = 24
 
 # ─── SUPABASE ─────────────────────────────────────────────────────────────────
 def supa_headers(prefer="return=representation"):
@@ -167,6 +171,40 @@ def supa_get_sla_audit(days:int=365) -> list:
         return r.json() if r.status_code == 200 else []
     except Exception as e: log.debug(f"[sla_audit] {e}"); return []
 
+def _check_kev_due_alerts():
+    """Teams + email alert for KEV items due within 3 days (nightly)."""
+    if not (SUPABASE_URL and SUPABASE_KEY): return
+    try:
+        r=requests.get(f"{SUPABASE_URL}/rest/v1/advisory_cache?is_kev=eq.true&is_archived=eq.false&select=data",
+                      headers=supa_headers(),timeout=10)
+        if r.status_code!=200: return
+        items=[row["data"] for row in r.json() if row.get("data")]
+        ar=requests.get(f"{SUPABASE_URL}/rest/v1/acknowledgments?select=id,status",headers=supa_headers(),timeout=8)
+        patched={a["id"] for a in (ar.json() if ar.status_code==200 else []) if a.get("status") in ("Patched","Accepted Risk","False Positive")}
+        now_dt=datetime.now(timezone.utc); alerts=[]
+        for item in items:
+            due=item.get("kev_due_date","")
+            if not due or item.get("id") in patched: continue
+            try:
+                dd=datetime.fromisoformat(due.replace("Z","+00:00"))
+                if dd.tzinfo is None: dd=dd.replace(tzinfo=timezone.utc)
+                d_left=(dd-now_dt).days
+                if 0<=d_left<=3: alerts.append({"cve":item.get("cve",""),"title":(item.get("title",""))[:80],"days":d_left,"due":due[:10]})
+            except Exception: continue
+        if not alerts: return
+        log.info(f"[KEV-ALERT] {len(alerts)} KEV items due within 3 days")
+        if TEAMS_WEBHOOK:
+            rows="\n".join(f"- **{a['cve']}** due in {a['days']}d ({a['due']}) — {a['title']}" for a in alerts)
+            requests.post(TEAMS_WEBHOOK,json={"text":f"KEV Remediation Due — {len(alerts)} unpatched item(s) approaching CISA deadline:\n{rows}"},timeout=8)
+        if SENDGRID_API_KEY and DIGEST_EMAIL:
+            from sendgrid.helpers.mail import Mail as _M; import sendgrid as _sg
+            rows_h="".join(f"<tr><td style='padding:6px;border-bottom:1px solid #f0f0f0;font-weight:600'>{a['cve']}</td><td style='padding:6px;border-bottom:1px solid #f0f0f0;color:#dc2626;font-weight:700'>{'TODAY' if a['days']==0 else str(a['days'])+'d'}</td><td style='padding:6px;border-bottom:1px solid #f0f0f0'>{a['due']}</td><td style='padding:6px;border-bottom:1px solid #f0f0f0;font-size:11px'>{a['title']}</td></tr>" for a in alerts)
+            html=f"""<div style='font-family:Arial,sans-serif;max-width:620px'><div style='background:#dc2626;color:#fff;padding:16px 20px;border-radius:8px 8px 0 0'><h2 style='margin:0'>KEV Remediation Due Soon</h2><p style='margin:4px 0 0;opacity:0.8'>{len(alerts)} item(s) due within 3 days</p></div><table width='100%' style='border-collapse:collapse'><thead><tr style='background:#f8f8f8'><th style='padding:7px;text-align:left;font-size:11px;color:#888'>CVE</th><th style='padding:7px;text-align:left;font-size:11px;color:#888'>Due In</th><th style='padding:7px;text-align:left;font-size:11px;color:#888'>Due Date</th><th style='padding:7px;text-align:left;font-size:11px;color:#888'>Advisory</th></tr></thead><tbody>{rows_h}</tbody></table><div style='padding:14px;text-align:center;background:#f8f8f8;border-radius:0 0 8px 8px'><a href='https://ssipankajsingh.github.io/security-advisory-dashboard/' style='background:#dc2626;color:#fff;padding:10px 24px;border-radius:6px;text-decoration:none;font-weight:600'>View Dashboard</a></div></div>"""
+            _sg.SendGridAPIClient(SENDGRID_API_KEY).send(_M(from_email=SENDER_EMAIL or "soc@concentrix.com",to_emails=DIGEST_EMAIL,
+                subject=f"[{len(alerts)} KEV] CISA remediation due within 3 days",html_content=html))
+    except Exception as e: log.error(f"[KEV-ALERT] {e}")
+
+
 def supa_save_archived():
     """
     Nightly archive: flag rows 90-365d as is_archived=TRUE.
@@ -198,6 +236,7 @@ def supa_save_archived():
         # Purge feed_metrics > 90d
         requests.delete(f"{SUPABASE_URL}/rest/v1/feed_metrics?fetched_at=lt.{met_cut}",
                        headers=supa_headers(), timeout=10)
+        _check_kev_due_alerts()
         log.info("[NIGHTLY] Archive + purge complete")
     except Exception as e: log.error(f"[NIGHTLY] Archive failed: {e}")
 
@@ -1082,6 +1121,9 @@ def normalise_entry(entry, source:str) -> dict:
 
 # ─── FETCH ────────────────────────────────────────────────────────────────────
 def fetch_rss(key:str, url:str) -> list:
+    if _feed_disabled.get(key,0) > time.time():
+        log.debug(f"[{key}] Skipping — auto-disabled")
+        return list(cache.get(key,[]))
     with cache_lock:
         if key in cache: return cache[key]
     if key == "mozilla": return fetch_mozilla_json()
@@ -1101,6 +1143,7 @@ def fetch_rss(key:str, url:str) -> list:
         with cache_lock: cache[key] = items
         threading.Thread(target=supa_record_feed_metrics,
             args=(key,len(items),items,True,"",0),daemon=True).start()
+        _feed_failures[key]=0; _feed_disabled.pop(key,None)
         return items
     except requests.exceptions.SSLError:
         try:
@@ -1117,6 +1160,12 @@ def fetch_rss(key:str, url:str) -> list:
         log.error(f"[{key}] Failed: {e}")
         threading.Thread(target=supa_record_feed_metrics,
             args=(key,0,[],False,str(e)[:200],0),daemon=True).start()
+        _feed_failures[key]=_feed_failures.get(key,0)+1
+        if _feed_failures[key]>=FEED_DISABLE_AFTER:
+            _feed_disabled[key]=time.time()+(FEED_RETRY_AFTER_H*3600)
+            log.warning(f"[{key}] Auto-disabled after {_feed_failures[key]} failures — retry in {FEED_RETRY_AFTER_H}h")
+            if TEAMS_WEBHOOK: threading.Thread(target=lambda k=key,n=_feed_failures.get(key,0):
+                requests.post(TEAMS_WEBHOOK,json={"text":f"Feed **{k}** auto-disabled after {n} failures. Retrying in {FEED_RETRY_AFTER_H}h."},timeout=5),daemon=True).start()
         return []
 
 def fetch_mozilla_json() -> list:
