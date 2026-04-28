@@ -554,7 +554,7 @@ OEM_TIER1 = {
     "redhat","android","oracle","splunk","veeam","cisa_kev","cisa_alerts","cisa_ics",
     "ncsc_uk","cert_eu","cert_in","zdi_published","mozilla","openssl",
     "netskope","forescout","aws","gcp","msrc_blog","trellix",
-    "ghsa","mitre_cve","vulncheck_nvd","vulncheck_kev",  # Pre-NVD sources treated as authoritative
+    "ghsa","mitre_cve","vulncheck_nvd","vulncheck_kev","cvelist_github",  # Pre-NVD sources
 }
 
 # ─── STARTUP LOG ──────────────────────────────────────────────────────────────
@@ -811,7 +811,7 @@ SOURCE_PRIORITY = {
     "ghsa":9,             # GitHub Advisory — authoritative for OSS
     "osv":8,              # Google OSV
     "mitre_cve":8,
-    "cvelist_github":8,   # MITRE-published CVE list via GitHub
+    "cvelist_github":4,   # MITRE CVEList via GitHub — fills gaps, low priority vs OEM/NVD
     # Aggregators
     "exploit_db":7,       # Has PoC/exploit info
     "vulncheck_nvd":7,
