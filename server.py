@@ -445,6 +445,7 @@ TRUSTED_FEEDS = {
     "ghsa":                  "__GHSA_API__",       # GitHub Advisory Database API
     "osv":                   "__OSV_API__",        # Google OSV.dev API
     "mitre_cve":             "__MITRE_CVE_API__",  # MITRE CVE List (cvelistV5)
+    "cvelist_github":        "__CVELIST_GITHUB__", # CVEProject/cvelistV5 — ALL CVEs within 1-2h
     "vulncheck_nvd":         "__VULNCHECK_API__",  # VulnCheck NVD++ — faster + richer than NIST NVD
     "vulncheck_kev":         "__VULNCHECK_KEV__",  # VulnCheck KEV — superset of CISA KEV + exploit intel
 
@@ -810,6 +811,7 @@ SOURCE_PRIORITY = {
     "ghsa":9,             # GitHub Advisory — authoritative for OSS
     "osv":8,              # Google OSV
     "mitre_cve":8,
+    "cvelist_github":8,   # MITRE-published CVE list via GitHub
     # Aggregators
     "exploit_db":7,       # Has PoC/exploit info
     "vulncheck_nvd":7,
@@ -1545,6 +1547,125 @@ def fetch_mitre_cve() -> list:
         return []
 
 
+def fetch_cvelist_github() -> list:
+    """
+    Fetch recent CVEs from CVEProject/cvelistV5 on GitHub.
+    MITRE publishes ALL CVEs here within 1-2h of CNA assignment —
+    much faster than NVD (12-24h) or vendor RSS feeds.
+    Covers ALL vendors: Microsoft, Cisco, Fortinet, Apple, Linux etc.
+    Requires GITHUB_TOKEN for reliable rate limits (60->5000 req/hr).
+    """
+    with cache_lock:
+        if "cvelist_github" in cache: return cache["cvelist_github"]
+    try:
+        gh_headers = {
+            "User-Agent":         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124",
+            "Accept":             "application/vnd.github+json",
+            "X-GitHub-Api-Version":"2022-11-28",
+        }
+        if os.getenv("GITHUB_TOKEN"):
+            gh_headers["Authorization"] = f"Bearer {os.getenv('GITHUB_TOKEN')}"
+
+        # Get commits from last 48h to find recently added/modified CVE files
+        since = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        commits_r = requests.get(
+            f"https://api.github.com/repos/CVEProject/cvelistV5/commits?path=cves&since={since}&per_page=20",
+            headers=gh_headers, timeout=15)
+        if commits_r.status_code == 403:
+            log.warning("[cvelist_github] Rate limited — add GITHUB_TOKEN env var")
+            return []
+        commits_r.raise_for_status()
+        commits = commits_r.json()
+        if not commits:
+            log.info("[cvelist_github] No new CVE commits in last 48h"); return []
+
+        # Collect unique CVE file paths from recent commits
+        cve_files = set()
+        for commit in commits[:8]:
+            sha = commit.get("sha",""); 
+            if not sha: continue
+            dr = requests.get(f"https://api.github.com/repos/CVEProject/cvelistV5/commits/{sha}",
+                             headers=gh_headers, timeout=10)
+            if dr.status_code != 200: continue
+            for f in dr.json().get("files",[]):
+                fn = f.get("filename","")
+                if fn.startswith("cves/") and fn.endswith(".json"):
+                    cve_files.add(fn)
+
+        log.info(f"[cvelist_github] {len(cve_files)} new/modified CVE files found")
+        items = []; now_iso = datetime.now(timezone.utc).isoformat()
+
+        for fpath in list(cve_files)[:80]:
+            try:
+                raw_r = requests.get(
+                    f"https://raw.githubusercontent.com/CVEProject/cvelistV5/main/{fpath}",
+                    headers={"User-Agent":"Mozilla/5.0"}, timeout=8)
+                if raw_r.status_code != 200: continue
+                d = raw_r.json()
+                meta = d.get("cveMetadata",{})
+                cna  = d.get("containers",{}).get("cna",{})
+                cve_id = meta.get("cveId","")
+                if not cve_id.startswith("CVE-"): continue
+                # Description
+                descs  = cna.get("descriptions",[])
+                desc_en = next((x["value"] for x in descs if x.get("lang","").startswith("en")),"" )
+                title  = desc_en[:120] if desc_en else cve_id
+                # CVSS
+                cvss_score = None; severity = "Unknown"
+                for m in cna.get("metrics",[]):
+                    for cv_key in ["cvssV3_1","cvssV3_0","cvssV4_0","cvssV2_0"]:
+                        cv = m.get(cv_key,{})
+                        if isinstance(cv,dict) and cv.get("baseScore"):
+                            cvss_score = cv["baseScore"]
+                            sev = cv.get("baseSeverity","").capitalize()
+                            if sev: severity = sev
+                            break
+                    if cvss_score: break
+                if cvss_score and (not severity or severity=="Unknown"):
+                    severity = ("Critical" if cvss_score>=9 else
+                                "High"     if cvss_score>=7 else
+                                "Medium"   if cvss_score>=4 else "Low")
+                # Products + vendor
+                affected = cna.get("affected",[])
+                products = [f"{a.get('vendor','')} {a.get('product','')}".strip()
+                            for a in affected[:5] if a.get("product")]
+                vendor = affected[0].get("vendor","") if affected else ""
+                # CWE
+                cwe = ""
+                for pt in cna.get("problemTypes",[]):
+                    for dx in pt.get("descriptions",[]):
+                        if dx.get("cweId","").startswith("CWE-"):
+                            cwe = dx["cweId"]; break
+                    if cwe: break
+                # Published date
+                pub = meta.get("datePublished") or meta.get("dateUpdated") or now_iso
+                if not is_within_window(pub): continue
+                items.append({
+                    "id":cve_id,"title":title[:200],"summary":desc_en[:400],
+                    "description":desc_en[:1000],"cve":cve_id,"cves":[cve_id],
+                    "link":f"https://www.cve.org/CVERecord?id={cve_id}",
+                    "url":f"https://www.cve.org/CVERecord?id={cve_id}",
+                    "published":pub,"severity":severity,"cvss":cvss_score,
+                    "zeroDay":False,"source":"cvelist_github",
+                    "vendor":normalise_vendor(vendor) if vendor else "MITRE",
+                    "products":products,"author":"","tags":["CVEList"],
+                    "isOEM":False,"isNews":False,"fetched_at":now_iso,
+                    "cwe":cwe,"patch_status":"unknown",
+                })
+            except Exception as e: log.debug(f"[cvelist_github] {fpath}: {e}"); continue
+
+        with cache_lock: cache["cvelist_github"] = items
+        log.info(f"[cvelist_github] ✅ {len(items)} CVEs from CVEProject/cvelistV5")
+        threading.Thread(target=supa_record_feed_metrics,
+            args=("cvelist_github",len(items),items,True,"",0),daemon=True).start()
+        return items
+    except Exception as e:
+        log.error(f"[cvelist_github] Failed: {e}")
+        threading.Thread(target=supa_record_feed_metrics,
+            args=("cvelist_github",0,[],False,str(e)[:200],0),daemon=True).start()
+        return []
+
+
 def fetch_vulncheck_nvd() -> list:
     """
     VulnCheck NVD++ — reliable, high-performance NVD replacement.
@@ -1832,6 +1953,7 @@ def fetch_all_advisories() -> list:
             elif key == "ghsa":           futures[executor.submit(fetch_ghsa)] = key
             elif key == "osv":            futures[executor.submit(fetch_osv)] = key
             elif key == "mitre_cve":      futures[executor.submit(fetch_mitre_cve)] = key
+            elif key == "cvelist_github": futures[executor.submit(fetch_cvelist_github)] = key
             elif key == "vulncheck_nvd":  futures[executor.submit(fetch_vulncheck_nvd)] = key
             elif key == "vulncheck_kev":  futures[executor.submit(fetch_vulncheck_kev)] = key
             else:                         futures[executor.submit(fetch_rss, key, url)] = key
