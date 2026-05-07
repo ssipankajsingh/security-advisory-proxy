@@ -593,6 +593,7 @@ NEWS_SOURCES = {
     "cloudflare",         # Cloudflare security blog
     "proofpoint",         # Proofpoint threat intel blog
     "certeu_threat_intel",# CERT-EU threat intelligence reports
+    "okta",               # developer.okta.com/feed.xml — developer blog, not a PSIRT feed
 }
 
 SEVERITY_KEYWORDS = {
@@ -1145,6 +1146,15 @@ def normalise_entry(entry, source:str) -> dict:
     # Only apply title-based detection if: not already news, not OEM, not a single CVE item
     if not is_news and not is_oem and is_news_by_title and not (all_cves and len(all_cves) >= 1):
         is_news = True
+    # URL-path blog detection — catches vendor/OEM developer blog posts regardless of source
+    # e.g. developer.okta.com/blog/..., company.com/blog/..., /news/, /post/
+    # Only applies if NO CVE ID found (a CVE reference makes it a real advisory)
+    BLOG_URL_PATTERNS = ["/blog/", "/blogs/", "/post/", "/posts/", "/article/", "/articles/"]
+    if not is_news and not all_cves and link:
+        link_lower = link.lower()
+        if any(pat in link_lower for pat in BLOG_URL_PATTERNS):
+            is_news = True
+            is_oem = False  # strip OEM flag from blog posts
     cvss_score   = extract_cvss_v3(combined)
     severity_raw = parse_severity(combined, source=source, is_oem=is_oem)
     # NEWS items capped at Medium — keyword matches on news titles inflate severity
