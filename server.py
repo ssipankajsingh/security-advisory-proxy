@@ -695,7 +695,60 @@ def extract_products(entry) -> list:
 
 def extract_products_from_text(text:str) -> list:
     """Extract software/product names from advisory text using common patterns."""
+    # Common English words/phrases that are NOT product names — block these
+    _STOPWORDS = {
+        "a", "an", "the", "this", "that", "these", "those", "it", "its",
+        "which", "who", "how", "when", "where", "what", "why",
+        "and", "or", "but", "not", "with", "from", "for", "via", "by",
+        "of", "to", "in", "on", "at", "as", "up", "be", "is", "are",
+        "was", "were", "has", "have", "had", "do", "does", "did",
+        "can", "could", "may", "might", "will", "would", "should", "shall",
+        "all", "any", "some", "no", "only", "also", "more", "other",
+        "new", "old", "high", "low", "large", "small", "multiple",
+        "remote", "local", "arbitrary", "malicious", "attacker", "user",
+        "service", "system", "systems", "server", "client", "network",
+        "memory", "code", "data", "file", "files", "access", "privilege",
+        "denial", "execution", "escalation", "bypass", "injection",
+        "overflow", "disclosure", "authentication", "authorization",
+        "vulnerability", "vulnerabilities", "issue", "issues", "flaw",
+        "affected", "affects", "impacted", "impacts", "product", "products",
+        "attacker", "victim", "request", "response", "packet", "header",
+        "buffer", "stack", "heap", "pointer", "null", "integer",
+        "crafted", "specially", "successfully", "unauthenticated",
+        "could", "allow", "result", "leading", "resulting", "cause",
+        "patch", "update", "upgrade", "workaround", "mitigat",
+    }
+
     products = []
+
+    def _is_valid(p: str) -> bool:
+        if not p or len(p) < 3 or len(p) > 60:
+            return False
+        # Reject pure lowercase common words
+        if p.lower() in _STOPWORDS:
+            return False
+        # Reject if ALL words are stopwords (e.g. "a denial")
+        words = p.lower().split()
+        if all(w in _STOPWORDS for w in words):
+            return False
+        # Reject strings that are just generic adjective+noun sentence fragments
+        if len(words) == 2 and words[0] in {"a","an","the","this","no","all","any"}:
+            return False
+        # Must have at least one capitalised or version-like token to be a product
+        has_proper = any(w[0].isupper() for w in p.split()) or re.search(r"\d", p)
+        if not has_proper:
+            return False
+        return True
+
+    # Ubuntu/Debian package pattern: "package: libfoo, libbar" or "packages libfoo"
+    for m in re.finditer(
+        r"(?:package[s]?|affected package[s]?)[:\s]+([a-z][a-z0-9\-\+\.]{1,40}(?:\s*,\s*[a-z][a-z0-9\-\+\.]{1,40})*)",
+        text, re.IGNORECASE):
+        for pkg in m.group(1).split(","):
+            p = pkg.strip()
+            if p and len(p) > 2 and p not in products:
+                products.append(p[:50])
+
     # "affects X versions Y through Z"
     for m in re.finditer(
         r"(?:affects?|affected|impacts?|impacted|vulnerable|in)\s+"
@@ -703,15 +756,17 @@ def extract_products_from_text(text:str) -> list:
         r"(?:\s+version|\s+v\d|[\s,\.;])",
         text, re.IGNORECASE):
         p = m.group(1).strip()
-        if p and len(p) > 3 and p not in products:
+        if _is_valid(p) and p not in products:
             products.append(p[:50])
+
     # "Product X Y.Z through Y.Z"
     for m in re.finditer(
         r"([A-Z][A-Za-z0-9\s]{2,30}?)\s+(?:version|v)[\s]*([\d\.]+)",
         text, re.IGNORECASE):
         p = m.group(1).strip()
-        if p and p not in products:
+        if _is_valid(p) and p not in products:
             products.append(p[:50])
+
     return products[:6]
 
 def extract_patch_info(text:str) -> str:
@@ -1052,7 +1107,14 @@ def normalise_entry(entry, source:str) -> dict:
         products = extract_products_from_text(combined)
     if not products:
         m = re.search(r"(?:product|affects?|affected)[:\s]+([^\n.]{3,80})", summary, re.IGNORECASE)
-        if m: products = [m.group(1).strip()[:60]]
+        if m:
+            candidate = m.group(1).strip()[:60]
+            # Reject pure sentence fragments like "a denial of service"
+            _words = candidate.lower().split()
+            _sw = {"a","an","the","this","denial","service","execution","overflow",
+                   "bypass","disclosure","escalation","injection","attacker","user"}
+            if not all(w in _sw for w in _words[:3]):
+                products = [candidate]
 
     # Patch/solution info extraction
     patch_info = extract_patch_info(combined)
@@ -1256,6 +1318,10 @@ def enrich_missing_cvss_from_nvd(advisories:list)->list:
                             if d.get("value","").startswith("CWE-"):
                                 tgt["cwe"]=d["value"]; break
                         if tgt.get("cwe"): break
+                # Issue 3 fix: store original NVD publication date separately
+                nvd_pub = cve_data.get("published","")
+                if nvd_pub and not tgt.get("nvd_published"):
+                    tgt["nvd_published"] = nvd_pub[:50]
                 tgt["_nvd_queried"]=True; enriched+=1
         except Exception as e: log.debug(f"[NVD-ENRICH] {cve_id}: {e}"); continue
         import time as _t; _t.sleep(0.65)
