@@ -596,11 +596,15 @@ NEWS_SOURCES = {
 }
 
 SEVERITY_KEYWORDS = {
-    "Critical":["critical","cvss 9","cvss 10","remote code execution","rce",
-                "zero-day","actively exploited","unauthenticated","pre-auth",
-                "authentication bypass","arbitrary code","arbitrary command"],
-    "High":    ["high","cvss 7","cvss 8","privilege escalation","zero day",
-                "sql injection","xxe","ssrf","path traversal","deserialization"],
+    # NOTE: bare "critical" removed — OEM feeds (MSRC etc.) embed their own portal severity
+    # label ("Critical") in RSS text regardless of CVSS score. This caused CVSS 3.7 → Critical.
+    # Instead require it to appear with exploitability context (rce, unauthenticated, etc.)
+    "Critical":["cvss 9","cvss 10","remote code execution","rce",
+                "zero-day","actively exploited","unauthenticated rce","pre-auth rce",
+                "authentication bypass","arbitrary code execution","arbitrary command execution"],
+    "High":    ["high severity","cvss 7","cvss 8","privilege escalation","zero day",
+                "sql injection","xxe","ssrf","path traversal","deserialization",
+                "critical severity"],  # "critical severity" phrase is still a High signal
     "Medium":  ["medium","moderate","cvss 5","cvss 6","denial of service",
                 "dos","information disclosure","xss","csrf","open redirect"],
     "Low":     ["low","cvss 1","cvss 2","cvss 3","cvss 4","minor","low severity"],
@@ -1311,7 +1315,18 @@ def enrich_missing_cvss_from_nvd(advisories:list)->list:
             tgt=adv_map.get(cve_id)
             if tgt and cvss_score:
                 if not tgt.get("cvss"):                                   tgt["cvss"]=cvss_score
-                if tgt.get("severity","Unknown")=="Unknown" and severity:  tgt["severity"]=severity
+                # Fix severity if: (a) currently Unknown, OR (b) NVD score strongly contradicts
+                # stored severity (e.g. keyword matched "Critical" from feed text but NVD says 3.7)
+                current_sev = tgt.get("severity","Unknown")
+                nvd_sev_correct = (
+                    current_sev == "Unknown"
+                    or (current_sev == "Critical" and cvss_score < 7.0)  # Critical but NVD says Medium/Low
+                    or (current_sev == "High"     and cvss_score < 4.0)  # High but NVD says Low
+                )
+                if nvd_sev_correct and severity:
+                    tgt["severity"] = severity
+                    if current_sev != "Unknown":
+                        tgt["severity_corrected_by_nvd"] = True  # flag for tooltip
                 if not tgt.get("cwe"):
                     for w in cve_data.get("weaknesses",[]):
                         for d in w.get("description",[]):
