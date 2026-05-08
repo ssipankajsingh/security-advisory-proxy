@@ -1297,9 +1297,19 @@ def fetch_cisa_kev() -> list:
 
 def enrich_missing_cvss_from_nvd(advisories:list)->list:
     """Query NVD for CVEs still missing CVSS after dedup. Free API, no key. Max 30/cycle."""
-    needs=[a for a in advisories if (a.get("cve") or "").startswith("CVE-")
-           and (not a.get("cvss") or a.get("severity","Unknown")=="Unknown")
-           and not a.get("_nvd_queried")][:30]
+    def _needs_nvd(a):
+        if not (a.get("cve") or "").startswith("CVE-"): return False
+        if a.get("_nvd_queried"): return False
+        # Missing CVSS or unknown severity — always query
+        if not a.get("cvss") or a.get("severity","Unknown")=="Unknown": return True
+        # Has CVSS but severity may be keyword-inflated — re-query to correct
+        # e.g. MSRC feed says "Critical" in text but NVD CVSS is 6.3 (Medium/High)
+        sev = a.get("severity","Unknown")
+        cvss = float(a.get("cvss",0))
+        if sev=="Critical" and cvss<7.0: return True
+        if sev=="High"     and cvss<4.0: return True
+        return False
+    needs=[a for a in advisories if _needs_nvd(a)][:30]
     if not needs: return advisories
     log.info(f"[NVD-ENRICH] Querying {len(needs)} CVEs missing CVSS/severity")
     adv_map={a["cve"]:a for a in advisories if a.get("cve")}
@@ -3135,6 +3145,128 @@ def _background_fetch_and_cache():
         log.error(f"[FETCH-NOW] ❌ Error: {e}")
     finally:
         _fetch_in_progress.clear()
+
+@app.route("/repair-severity", methods=["GET","POST"])
+def repair_severity():
+    """
+    One-time repair: re-queries NVD for all Supabase rows where severity=Critical
+    but cvss < 7.0. Corrects severity based on actual NVD score.
+    Protected by ACCESS_CODE (same as the main dashboard).
+
+    Usage:
+      GET /repair-severity?code=CNXadvisorySEC@123
+      Returns JSON with corrected count and details.
+    """
+    provided = request.args.get("code","") or request.headers.get("X-Access-Code","")
+    if provided != ACCESS_CODE:
+        return jsonify({"error": "Unauthorised"}), 403
+
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return jsonify({"error": "Supabase not configured"}), 500
+
+    import time as _t
+
+    # 1. Load all Critical rows from Supabase advisory_cache
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/advisory_cache",
+            headers=supa_headers(),
+            params={"severity": "eq.Critical", "select": "id,cve_id,cvss,data", "limit": 500},
+            timeout=20)
+        rows = r.json() if r.status_code == 200 else []
+    except Exception as e:
+        return jsonify({"error": f"Supabase load failed: {e}"}), 500
+
+    # 2. Filter to rows with cvss < 7.0 (misclassified)
+    candidates = []
+    for row in rows:
+        try:
+            cvss = float(row.get("cvss") or 0)
+        except (ValueError, TypeError):
+            cvss = 0
+        cve_id = (row.get("cve_id") or "").strip()
+        if cvss > 0 and cvss < 7.0 and cve_id.startswith("CVE-"):
+            candidates.append({"id": row["id"], "cve_id": cve_id, "cvss": cvss, "data": row.get("data",{})})
+
+    log.info(f"[REPAIR-SEV] Found {len(candidates)} Critical rows with CVSS < 7.0 to check")
+
+    corrected = []
+    skipped = []
+    errors = []
+
+    SEV_MAP = {(9.0, 10.1): "Critical", (7.0, 9.0): "High",
+               (4.0, 7.0): "Medium", (0.1, 4.0): "Low"}
+
+    for item in candidates[:100]:  # cap at 100 per run
+        cve_id = item["cve_id"]
+        try:
+            resp = requests.get(
+                f"https://services.nvd.nist.gov/rest/json/cves/2.0",
+                params={"cveId": cve_id}, timeout=12,
+                headers={"User-Agent": "SecurityAdvisoryProxy/2.0"})
+            if resp.status_code != 200:
+                skipped.append(cve_id); _t.sleep(0.65); continue
+            nvd_data = resp.json().get("vulnerabilities", [])
+            if not nvd_data:
+                skipped.append(cve_id); _t.sleep(0.65); continue
+
+            cve_data = nvd_data[0].get("cve", {})
+            # Extract NVD CVSS v3 score
+            nvd_cvss = None; nvd_sev = None
+            for metric_key in ("cvssMetricV31","cvssMetricV30"):
+                metrics = cve_data.get("metrics",{}).get(metric_key,[])
+                for m in metrics:
+                    if m.get("type") in ("Primary","Secondary"):
+                        nvd_cvss = m.get("cvssData",{}).get("baseScore")
+                        nvd_sev  = m.get("cvssData",{}).get("baseSeverity","").capitalize()
+                        break
+                if nvd_cvss: break
+
+            if not nvd_cvss:
+                skipped.append(cve_id); _t.sleep(0.65); continue
+
+            # Calculate correct severity from NVD score
+            correct_sev = nvd_sev
+            if not correct_sev:
+                for (lo, hi), s in SEV_MAP.items():
+                    if lo <= nvd_cvss < hi: correct_sev = s; break
+
+            if correct_sev and correct_sev != "Critical":
+                # Update Supabase row: severity column + data blob
+                data = item["data"] or {}
+                data["severity"] = correct_sev
+                data["severity_corrected_by_nvd"] = True
+                data["_nvd_queried"] = True
+                data["cvss"] = nvd_cvss
+
+                patch_r = requests.patch(
+                    f"{SUPABASE_URL}/rest/v1/advisory_cache?id=eq.{item['id']}",
+                    headers={**supa_headers(), "Prefer": "return=minimal"},
+                    json={"severity": correct_sev, "cvss": nvd_cvss, "data": data},
+                    timeout=10)
+                if patch_r.status_code in (200, 204):
+                    corrected.append({"cve": cve_id, "old": "Critical",
+                                      "new": correct_sev, "cvss": nvd_cvss})
+                    log.info(f"[REPAIR-SEV] ✅ {cve_id}: Critical → {correct_sev} (CVSS {nvd_cvss})")
+                else:
+                    errors.append(f"{cve_id}: patch failed {patch_r.status_code}")
+            else:
+                skipped.append(cve_id)  # NVD also says Critical — correct as-is
+
+        except Exception as e:
+            errors.append(f"{cve_id}: {e}")
+        _t.sleep(0.7)  # NVD free tier rate limit
+
+    return jsonify({
+        "status": "complete",
+        "candidates": len(candidates),
+        "corrected": len(corrected),
+        "skipped": len(skipped),
+        "errors": len(errors),
+        "corrections": corrected,
+        "error_details": errors[:10],
+    })
+
 
 @app.route("/fetch-now", methods=["GET","POST"])
 def fetch_now():
