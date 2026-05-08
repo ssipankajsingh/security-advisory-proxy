@@ -3251,7 +3251,14 @@ def repair_severity():
                 else:
                     errors.append(f"{cve_id}: patch failed {patch_r.status_code}")
             else:
-                skipped.append(cve_id)  # NVD also says Critical — correct as-is
+                # NVD also says Critical — mark as queried so it stops reappearing
+                skipped.append(cve_id)
+                data = item["data"] or {}
+                data["_nvd_queried"] = True
+                requests.patch(
+                    f"{SUPABASE_URL}/rest/v1/advisory_cache?id=eq.{item['id']}",
+                    headers={**supa_headers(), "Prefer": "return=minimal"},
+                    json={"data": data}, timeout=10)
 
         except Exception as e:
             errors.append(f"{cve_id}: {e}")
