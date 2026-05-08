@@ -1308,6 +1308,8 @@ def enrich_missing_cvss_from_nvd(advisories:list)->list:
         cvss = float(a.get("cvss",0))
         if sev=="Critical" and cvss<7.0: return True
         if sev=="High"     and cvss<4.0: return True
+        # KEV items hardcoded Critical with no CVSS — enrich to get real score
+        if a.get("isKev") and not a.get("cvss"): return True
         return False
     needs=[a for a in advisories if _needs_nvd(a)][:30]
     if not needs: return advisories
@@ -1337,16 +1339,20 @@ def enrich_missing_cvss_from_nvd(advisories:list)->list:
                 if not tgt.get("cvss"):                                   tgt["cvss"]=cvss_score
                 # Fix severity if: (a) currently Unknown, OR (b) NVD score strongly contradicts
                 # stored severity (e.g. keyword matched "Critical" from feed text but NVD says 3.7)
+                # EXCEPTION: KEV items stay Critical regardless — active exploitation trumps CVSS
                 current_sev = tgt.get("severity","Unknown")
+                is_kev_item = tgt.get("isKev") or tgt.get("source","") in ("CISA KEV","cisa_kev","vulncheck_kev")
                 nvd_sev_correct = (
-                    current_sev == "Unknown"
-                    or (current_sev == "Critical" and cvss_score < 7.0)  # Critical but NVD says Medium/Low
-                    or (current_sev == "High"     and cvss_score < 4.0)  # High but NVD says Low
+                    not is_kev_item and (
+                        current_sev == "Unknown"
+                        or (current_sev == "Critical" and cvss_score < 7.0)
+                        or (current_sev == "High"     and cvss_score < 4.0)
+                    )
                 )
                 if nvd_sev_correct and severity:
                     tgt["severity"] = severity
                     if current_sev != "Unknown":
-                        tgt["severity_corrected_by_nvd"] = True  # flag for tooltip
+                        tgt["severity_corrected_by_nvd"] = True
                 if not tgt.get("cwe"):
                     for w in cve_data.get("weaknesses",[]):
                         for d in w.get("description",[]):
@@ -1402,8 +1408,10 @@ def enrich_with_epss(advisories:list) -> list:
             a["epss"]       = epss_map[cve]["epss"]
             a["epss_pct"]   = epss_map[cve]["percentile"]
             a["epss_date"]  = epss_map[cve]["date"]
-            # Auto-upgrade severity if EPSS is very high but severity is unknown/low
-            if a["epss"] >= 50 and a.get("severity","Unknown") in ("Unknown","Low"):
+            # Auto-upgrade severity if EPSS is extremely high but severity is unknown
+            # 70% EPSS = top ~2% of all CVEs — very strong exploitation signal
+            # Only upgrade from Unknown (never override NVD-sourced severity)
+            if a["epss"] >= 70 and a.get("severity","Unknown") == "Unknown":
                 a["severity"] = "High"
                 a["epss_upgraded"] = True
         else:
@@ -1490,7 +1498,7 @@ def fetch_ghsa() -> list:
                 "fetched_at": datetime.now(timezone.utc).isoformat(),
                 "patch_status": "available" if a.get("vulnerabilities") else "unknown",
                 "kev_due_date": "", "required_action": "", "kev_notes": "",
-                "data_quality": "RICH" if (cve_id and cvss_val) else "PARTIAL",
+                "data_quality": "rich" if (cve_id and cvss_val) else "partial",
             })
         with cache_lock: cache["ghsa"] = items
         log.info(f"[ghsa] ✅ {len(items)} items (GitHub Advisory DB)")
@@ -1570,7 +1578,7 @@ def fetch_osv() -> list:
                     for r in (a.get("ranges") or [])
                 ) else "unknown",
                 "kev_due_date": "", "required_action": "", "kev_notes": "",
-                "data_quality": "RICH" if (cve_id and cvss_val) else "PARTIAL",
+                "data_quality": "rich" if (cve_id and cvss_val) else "partial",
             })
         with cache_lock: cache["osv"] = items
         log.info(f"[osv] ✅ {len(items)} items (OSV.dev)")
@@ -1638,7 +1646,7 @@ def fetch_mitre_cve() -> list:
                 "fetched_at": datetime.now(timezone.utc).isoformat(),
                 "patch_status": _infer_patch_status(desc),
                 "kev_due_date": "", "required_action": "", "kev_notes": "",
-                "data_quality": "RICH" if (desc and cvss_val) else "PARTIAL",
+                "data_quality": "rich" if (desc and cvss_val) else "partial",
             })
         with cache_lock: cache["mitre_cve"] = items
         log.info(f"[mitre_cve] ✅ {len(items)} items (MITRE CVE List)")
@@ -1859,7 +1867,7 @@ def fetch_vulncheck_nvd() -> list:
                 "required_action": kev_data.get("requiredAction",""),
                 "kev_notes":     f"Ransomware: {ransomware}" + (f" | Exploits: {len(xdb_entries)}" if xdb_entries else ""),
                 "exploit_refs":  exploit_refs,
-                "data_quality":  "RICH" if (desc and cvss_val) else "PARTIAL",
+                "data_quality":  "rich" if (desc and cvss_val) else "partial",
             })
 
         with cache_lock: cache["vulncheck_nvd"] = items
@@ -1946,7 +1954,7 @@ def fetch_vulncheck_kev() -> list:
                                   (f" | {len(xdb)} exploit PoC(s)" if xdb else "") +
                                   (f" | {len(reported)} exploitation report(s)" if reported else "")),
                 "exploit_refs":  [x.get("xdb_url","") for x in xdb[:3]],
-                "data_quality":  "RICH",
+                "data_quality":  "rich",
             })
 
         with cache_lock: cache["vulncheck_kev"] = items
