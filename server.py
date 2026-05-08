@@ -321,7 +321,30 @@ def supa_save_advisory_cache(advisories:list) -> bool:
             })
         # Upsert: on conflict(id) only update data + severity/flags, NOT fetched_at
         # This preserves the original first-seen timestamp
+        # IMPORTANT: preserve NVD-corrected severities — load corrected rows from
+        # Supabase and apply them back so the upsert doesn't re-inflate severity
         h = {**supa_headers(), "Prefer": "resolution=merge-duplicates"}
+        try:
+            cr = requests.get(
+                f"{SUPABASE_URL}/rest/v1/advisory_cache"
+                f"?select=id,severity,cvss,data&limit=2000",
+                headers=supa_headers(), timeout=15)
+            if cr.status_code == 200:
+                for existing in cr.json():
+                    if (existing.get("data") or {}).get("severity_corrected_by_nvd"):
+                        # This row was NVD-corrected — find it in our upsert rows
+                        # and restore the corrected severity so we don't overwrite it
+                        for row in rows:
+                            if row["id"] == existing["id"]:
+                                row["severity"] = existing["severity"]
+                                row["cvss"] = existing["cvss"]
+                                if row.get("data"):
+                                    row["data"]["severity"] = existing["severity"]
+                                    row["data"]["severity_corrected_by_nvd"] = True
+                                    row["data"]["_nvd_queried"] = True
+                                break
+        except Exception as e:
+            log.debug(f"[SUPABASE] Could not load corrected severities: {e}")
         saved = 0; failed = 0
         for i in range(0, len(rows), 100):
             r = requests.post(f"{SUPABASE_URL}/rest/v1/advisory_cache",
