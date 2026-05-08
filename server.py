@@ -3315,11 +3315,79 @@ scheduler = BackgroundScheduler(timezone="UTC")
 # 08:00 IST → 1 combined email: Daily Digest + Morning Handover (merged)
 # 08:05 IST → Teams notification
 # 20:00 IST → Evening Handover (Teams + email)
+def scheduled_severity_repair():
+    """Nightly job: correct Critical rows in Supabase where NVD CVSS < 7.0."""
+    if not (SUPABASE_URL and SUPABASE_KEY): return
+    import time as _t
+    log.info("[REPAIR-SEV-NIGHTLY] Starting nightly severity correction pass")
+    try:
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/advisory_cache",
+            headers=supa_headers(),
+            params={"severity":"eq.Critical","select":"id,cve_id,cvss,data","limit":200},
+            timeout=20)
+        rows = r.json() if r.status_code==200 else []
+    except Exception as e:
+        log.error(f"[REPAIR-SEV-NIGHTLY] Supabase load failed: {e}"); return
+
+    candidates = []
+    for row in rows:
+        try: cvss=float(row.get("cvss") or 0)
+        except: cvss=0
+        cve_id=(row.get("cve_id") or "").strip()
+        data=row.get("data") or {}
+        if cvss>0 and cvss<7.0 and cve_id.startswith("CVE-") and not data.get("_nvd_queried"):
+            candidates.append({"id":row["id"],"cve_id":cve_id,"cvss":cvss,"data":data})
+
+    if not candidates:
+        log.info("[REPAIR-SEV-NIGHTLY] Nothing to repair ✅"); return
+
+    log.info(f"[REPAIR-SEV-NIGHTLY] {len(candidates)} candidates to check")
+    corrected=0
+    SEV_MAP={(9.0,10.1):"Critical",(7.0,9.0):"High",(4.0,7.0):"Medium",(0.1,4.0):"Low"}
+    for item in candidates[:50]:  # cap at 50/night to stay within NVD limits
+        cve_id=item["cve_id"]
+        try:
+            resp=requests.get("https://services.nvd.nist.gov/rest/json/cves/2.0",
+                params={"cveId":cve_id},timeout=12,
+                headers={"User-Agent":"SecurityAdvisoryProxy/2.0"})
+            if resp.status_code!=200: _t.sleep(0.7); continue
+            vulns=resp.json().get("vulnerabilities",[])
+            if not vulns: _t.sleep(0.7); continue
+            cve_data=vulns[0].get("cve",{})
+            nvd_cvss=None; nvd_sev=None
+            for mk in ("cvssMetricV31","cvssMetricV30"):
+                for m in cve_data.get("metrics",{}).get(mk,[]):
+                    if m.get("type") in ("Primary","Secondary"):
+                        nvd_cvss=m.get("cvssData",{}).get("baseScore")
+                        nvd_sev=m.get("cvssData",{}).get("baseSeverity","").capitalize()
+                        break
+                if nvd_cvss: break
+            if not nvd_cvss: _t.sleep(0.7); continue
+            correct_sev=nvd_sev or next((s for (lo,hi),s in SEV_MAP.items() if lo<=nvd_cvss<hi),None)
+            data=item["data"]; data["_nvd_queried"]=True
+            if correct_sev and correct_sev!="Critical":
+                data["severity"]=correct_sev; data["severity_corrected_by_nvd"]=True
+                data["cvss"]=nvd_cvss
+                requests.patch(f"{SUPABASE_URL}/rest/v1/advisory_cache?id=eq.{item['id']}",
+                    headers={**supa_headers(),"Prefer":"return=minimal"},
+                    json={"severity":correct_sev,"cvss":nvd_cvss,"data":data},timeout=10)
+                log.info(f"[REPAIR-SEV-NIGHTLY] ✅ {cve_id}: Critical → {correct_sev} (CVSS {nvd_cvss})")
+                corrected+=1
+            else:
+                requests.patch(f"{SUPABASE_URL}/rest/v1/advisory_cache?id=eq.{item['id']}",
+                    headers={**supa_headers(),"Prefer":"return=minimal"},
+                    json={"data":data},timeout=10)
+        except Exception as e: log.debug(f"[REPAIR-SEV-NIGHTLY] {cve_id}: {e}")
+        _t.sleep(0.7)
+    log.info(f"[REPAIR-SEV-NIGHTLY] Done — {corrected}/{len(candidates)} corrected")
+
+
 scheduler.add_job(scheduled_morning,      "cron", hour=2,  minute=30)   # 08:00 IST — combined digest+handover
 scheduler.add_job(scheduled_teams,        "cron", hour=2,  minute=35)   # 08:05 IST — Teams morning card
 scheduler.add_job(scheduled_patch_tuesday,"cron", hour=3,  minute=0)    # 08:30 IST — Patch Tuesday check
 scheduler.add_job(supa_purge_old_acks,    "cron", hour=0,  minute=0)    # 00:00 UTC — purge old acks
-scheduler.add_job(supa_save_archived,     "cron", hour=1,  minute=0)    # 01:00 UTC — nightly archive + purge
+scheduler.add_job(supa_save_archived,          "cron", hour=1,  minute=0)    # 01:00 UTC — nightly archive + purge
+scheduler.add_job(scheduled_severity_repair,   "cron", hour=1,  minute=30)   # 01:30 UTC — nightly severity correction
 scheduler.add_job(scheduled_handover,     "cron", hour=14, minute=30)   # 20:00 IST — evening handover
 # cron-job.org is primary fetch trigger — internal disabled to prevent double alerts:
 # scheduler.add_job(_background_fetch_and_cache, "interval", minutes=30, id="background_fetch")
