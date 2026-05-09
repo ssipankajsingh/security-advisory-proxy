@@ -516,11 +516,11 @@ TRUSTED_FEEDS = {
     # ══ ENDPOINT SECURITY ════════════════════════════════════════════════════
     "crowdstrike_blog":       "https://www.crowdstrike.com/blog/feed/",
     "sentinelone":            "https://www.sentinelone.com/labs/feed/",
-    "sophos":                 "https://www.welivesecurity.com/en/feed/",
+    "sophos":                 "https://www.sophos.com/en-us/security-advisories.xml",
     "trendmicro":             "https://feeds.feedburner.com/Anti-MalwareBlog",
-    "trellix":                "https://www.rapid7.com/blog/rss/",
+    "trellix":                "https://www.trellix.com/en-us/rss/security-advisories.xml",
     "malwarebytes":           "https://www.malwarebytes.com/blog/feed/",
-    "eset":                   "https://www.welivesecurity.com/feed/",
+    "eset":                   "https://www.welivesecurity.com/en/feed/",
 
     # ══ CLOUD & BROWSER ══════════════════════════════════════════════════════
     "aws":          "https://aws.amazon.com/security/security-bulletins/feed/",
@@ -544,14 +544,14 @@ TRUSTED_FEEDS = {
     "netskope":     "https://www.netskope.com/blog/feed",
     "proofpoint":   "https://www.proofpoint.com/us/rss.xml",
     "solarwinds":   "https://www.solarwinds.com/shared-content/rss-feed/solarwinds-cve-rss-feed.xml",
-    "forescout":    "https://claroty.com/team82/blog/rss.xml",
+    "forescout":    "https://www.forescout.com/resources/feed/?type=advisory",
 
     # ══ THREAT INTEL ══════════════════════════════════════════════════════════
     "mandiant":     "https://www.mandiant.com/resources/blog/rss.xml",
     "talos":        "https://feeds.feedburner.com/feedburner/Talos",
     "unit42":       "https://unit42.paloaltonetworks.com/feed/",
     "msft_ti":      "https://www.microsoft.com/en-us/security/blog/feed/",
-    "secureworks":  "https://www.huntress.com/blog/rss.xml",
+    "secureworks":  "https://www.secureworks.com/rss?feed=blog",
     "recorded_fut": "https://therecord.media/feed/",
 
     # ══ NEWS & COMMUNITY ══════════════════════════════════════════════════════
@@ -628,6 +628,10 @@ NEWS_SOURCES = {
     "proofpoint",         # Proofpoint threat intel blog
     "certeu_threat_intel",# CERT-EU threat intelligence reports
     "okta",               # developer.okta.com/feed.xml — developer blog, not a PSIRT feed
+    "eset",               # WeLiveSecurity (ESET blog) — threat research articles, not PSIRT
+    "malwarebytes",       # Malwarebytes Labs — research blog, not structured PSIRT
+    "netskope",           # Netskope blog — research articles
+    "docker",             # Docker security blog — articles, not structured advisories
 }
 
 SEVERITY_KEYWORDS = {
