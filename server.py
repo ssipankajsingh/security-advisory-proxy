@@ -570,14 +570,25 @@ TRUSTED_FEEDS = {
 
 SOURCE_COUNT = len(TRUSTED_FEEDS)
 
-# OEM/Vendor Tier 1 — shown first in feed (direct vendor PSIRTs)
+# OEM/Vendor Tier 1 — direct vendor PSIRTs (structured, authoritative)
 OEM_TIER1 = {
     "msrc","cisco","fortinet","paloalto","juniper","f5","sonicwall",
     "ivanti","citrix","checkpoint","vmware","sophos","apple","ubuntu",
     "redhat","android","oracle","splunk","veeam","cisa_kev","cisa_alerts","cisa_ics",
-    "ncsc_uk","cert_eu","cert_in","zdi_published","mozilla","openssl",
+    "ncsc_uk","cert_eu","cert_in","mozilla","openssl",
     "netskope","forescout","aws","gcp","msrc_blog","trellix",
     "ghsa","mitre_cve","vulncheck_nvd","vulncheck_kev","cvelist_github",  # Pre-NVD sources
+}
+
+# Research / Exploit Intel — NOT vendor PSIRTs; published before vendor patches exist.
+# These are valuable threat intel but have different SLA expectations:
+# - ZDI publishes disclosures on their own timeline, patch may not exist
+# - Exploit-DB shows public PoC exists (exploitation signal, not a patch advisory)
+# SLA for research sources = awareness window, not remediation deadline
+RESEARCH_SOURCES = {
+    "zdi_published",  # Zero Day Initiative — vendor-notified but not always patched
+    "zdi_upcoming",   # ZDI upcoming disclosures — definitely no patch yet
+    "exploit_db",     # Exploit-DB — PoC exploit published, may predate vendor patch
 }
 
 # ─── STARTUP LOG ──────────────────────────────────────────────────────────────
@@ -1156,6 +1167,7 @@ def normalise_entry(entry, source:str) -> dict:
     is_oem       = source in OEM_TIER1
     is_news      = source in NEWS_SOURCES
     is_zero_src  = source in ZERO_DAY_SOURCES
+    is_research  = source in RESEARCH_SOURCES
     # Detect blog/analysis articles mixed into advisory feeds (e.g. CrowdStrike Patch Tuesday posts)
     # Title-based news detection — only for non-OEM sources
     # OEM Tier 1 sources (msrc, cisco, fortinet etc.) NEVER flagged as news by title
@@ -1209,8 +1221,9 @@ def normalise_entry(entry, source:str) -> dict:
         "bug_id":           bug_id,
         "author":           extract_author(entry),
         "tags":             [t.get("term","") for t in (getattr(entry,"tags",[]) or []) if t.get("term")][:6],
-        "isOEM":            is_oem,
+        "isOEM":            is_oem and not is_research,  # Research sources not OEM
         "isNews":           is_news,
+        "isResearch":       is_research,
     }
     advisory["data_quality"]   = data_quality(advisory)
     advisory["fetched_at"]     = datetime.now(timezone.utc).isoformat()
