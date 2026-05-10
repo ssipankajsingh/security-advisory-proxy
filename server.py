@@ -572,12 +572,26 @@ SOURCE_COUNT = len(TRUSTED_FEEDS)
 
 # OEM/Vendor Tier 1 — direct vendor PSIRTs (structured, authoritative)
 OEM_TIER1 = {
-    "msrc","cisco","fortinet","paloalto","juniper","f5","sonicwall",
-    "ivanti","citrix","checkpoint","vmware","sophos","apple","ubuntu",
-    "redhat","android","oracle","splunk","veeam","cisa_kev","cisa_alerts","cisa_ics",
-    "ncsc_uk","cert_eu","cert_in","mozilla","openssl",
-    "netskope","forescout","aws","gcp","msrc_blog","trellix",
-    "ghsa","mitre_cve","vulncheck_nvd","vulncheck_kev","cvelist_github",  # Pre-NVD sources
+    # Endpoint / OS
+    "msrc","sophos","apple","ubuntu","redhat","android","trellix","sentinelone","crowdstrike",
+    # Network / Firewall
+    "cisco","fortinet","paloalto","juniper","f5","sonicwall","checkpoint","aruba",
+    # Identity / Access
+    "ivanti","citrix",
+    # Virtualisation / Cloud
+    "vmware","aws","gcp",
+    # Enterprise Apps
+    "oracle","sap","adobe","splunk","veeam","solarwinds","prtg","netscout",
+    # Browser / Runtime
+    "mozilla","openssl","chrome",
+    # Government / CERT
+    "cisa_kev","cisa_alerts","cisa_ics","ncsc_uk","cert_eu","cert_in",
+    # Your Stack
+    "forescout",
+    # Blog variants (structured advisories mixed with posts)
+    "msrc_blog",
+    # Pre-NVD aggregators (authoritative CVE data)
+    "ghsa","mitre_cve","vulncheck_nvd","vulncheck_kev","cvelist_github",
 }
 
 # Research / Exploit Intel — NOT vendor PSIRTs; published before vendor patches exist.
@@ -1340,10 +1354,12 @@ def enrich_missing_cvss_from_nvd(advisories:list)->list:
     def _needs_nvd(a):
         if not (a.get("cve") or "").startswith("CVE-"): return False
         if a.get("_nvd_queried"): return False
-        # Missing CVSS or unknown severity — always query
-        if not a.get("cvss") or a.get("severity","Unknown")=="Unknown": return True
-        # Has CVSS but severity may be keyword-inflated — re-query to correct
-        # e.g. MSRC feed says "Critical" in text but NVD CVSS is 6.3 (Medium/High)
+        # Always enrich if CVSS is completely missing — even if severity is set
+        # (many OEM feeds set severity from title keywords but omit CVSS score)
+        if not a.get("cvss"): return True
+        # Unknown severity — always enrich
+        if a.get("severity","Unknown")=="Unknown": return True
+        # Has CVSS but severity may be keyword-inflated
         sev = a.get("severity","Unknown")
         cvss = float(a.get("cvss",0))
         if sev=="Critical" and cvss<7.0: return True
