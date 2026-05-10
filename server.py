@@ -144,14 +144,19 @@ def supa_delete_saved_search(search_id:int) -> bool:
 
 def supa_load_archived(limit:int=200, offset:int=0, severity:str="",
                         source:str="", days_back:int=365) -> list:
-    """Load archived advisories (90-365 days old)."""
+    """Load archived advisories — either flagged is_archived=true OR older than 90 days."""
     if not (SUPABASE_URL and SUPABASE_KEY): return []
     try:
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days_back)).isoformat()
+        now_dt = datetime.now(timezone.utc)
+        cutoff_old = (now_dt - timedelta(days=days_back)).isoformat()
+        cutoff_90  = (now_dt - timedelta(days=90)).isoformat()
+        # Query rows older than 90 days (regardless of is_archived flag)
+        # This ensures archive works even before nightly job has run
         url = (f"{SUPABASE_URL}/rest/v1/advisory_cache"
-               f"?select=data,published_at,severity,source,cve_id"
-               f"&is_archived=eq.true&published_at=gte.{cutoff}"
-               f"&order=published_at.desc&limit={limit}&offset={offset}")
+               f"?select=data,published,severity,source,cve_id"
+               f"&published=gte.{cutoff_old}&published=lte.{cutoff_90}"
+               f"&is_news=eq.false"
+               f"&order=published.desc&limit={limit}&offset={offset}")
         if severity: url += f"&severity=eq.{severity}"
         if source:   url += f"&source=eq.{source}"
         r = requests.get(url, headers=supa_headers(), timeout=15)
