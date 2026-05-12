@@ -3344,6 +3344,70 @@ def repair_severity():
     })
 
 
+@app.route("/trigger-morning", methods=["GET","POST"])
+def trigger_morning():
+    """
+    External cron trigger for the 08:00 IST morning digest + Teams card.
+    Call this from cron-job.org at 02:30 UTC (= 08:00 IST) every day.
+    Protected by CRON_SECRET — same secret used for /fetch-now.
+
+    cron-job.org setup:
+      URL: https://security-advisory-proxy.onrender.com/trigger-morning?secret=YOUR_SECRET
+      Schedule: Every day at 02:30 UTC
+      Method: GET
+
+    This endpoint ensures the digest fires even when Render has spun down overnight.
+    The HTTP request itself wakes the server before the job runs.
+    """
+    if not CRON_SECRET:
+        return jsonify({"error": "CRON_SECRET not configured"}), 403
+    provided = (request.args.get("secret","") or
+                request.headers.get("X-Cron-Secret",""))
+    if provided != CRON_SECRET:
+        return jsonify({"error": "Unauthorised"}), 403
+
+    log.info("[TRIGGER] /trigger-morning called — running morning digest")
+    import threading
+    def _run():
+        try:
+            scheduled_morning()
+            scheduled_teams()
+        except Exception as e:
+            log.error(f"[TRIGGER] Morning digest error: {e}")
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"status": "morning digest triggered", "time_utc": datetime.now(timezone.utc).isoformat()})
+
+
+@app.route("/trigger-evening", methods=["GET","POST"])
+def trigger_evening():
+    """
+    External cron trigger for the 20:00 IST evening handover.
+    Call this from cron-job.org at 14:30 UTC (= 20:00 IST) every day.
+    Protected by CRON_SECRET.
+
+    cron-job.org setup:
+      URL: https://security-advisory-proxy.onrender.com/trigger-evening?secret=YOUR_SECRET
+      Schedule: Every day at 14:30 UTC
+      Method: GET
+    """
+    if not CRON_SECRET:
+        return jsonify({"error": "CRON_SECRET not configured"}), 403
+    provided = (request.args.get("secret","") or
+                request.headers.get("X-Cron-Secret",""))
+    if provided != CRON_SECRET:
+        return jsonify({"error": "Unauthorised"}), 403
+
+    log.info("[TRIGGER] /trigger-evening called — running evening handover")
+    import threading
+    def _run():
+        try:
+            scheduled_handover()
+        except Exception as e:
+            log.error(f"[TRIGGER] Evening handover error: {e}")
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"status": "evening handover triggered", "time_utc": datetime.now(timezone.utc).isoformat()})
+
+
 @app.route("/fetch-now", methods=["GET","POST"])
 def fetch_now():
     """
