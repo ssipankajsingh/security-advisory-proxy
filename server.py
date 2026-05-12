@@ -460,6 +460,273 @@ def supa_purge_old_acks():
         log.info("[SUPABASE] Old acks purged")
     except Exception as e: log.error(f"[SUPABASE] purge_acks: {e}")
 
+
+# ─── CNX STACK ASSET INVENTORY ───────────────────────────────────────────────
+# Derived from SolarWinds infrastructure + software inventory
+# Used to auto-tag advisories that affect Concentrix's actual environment
+# Structure: vendor_keyword → {products, eol, tier}
+#   tier: "network" | "endpoint" | "server" | "app"
+#   eol: True = End-of-Life/End-of-Support (cannot be patched, only mitigated)
+
+CNX_STACK = {
+    # ── NETWORK DEVICES ────────────────────────────────────────────────────────
+    "cisco": {
+        "tier": "network",
+        "products": [
+            # ASA Firewalls
+            "ASA 5508","ASA 5510","ASA 5515","ASA 5516","ASA 5525","ASA 5545",
+            "ASA 5550","ASA 5585","Firepower 1150","Firepower 2110",
+            # Catalyst Switches
+            "Catalyst 2960","Catalyst 29xx","Catalyst 37xx","Catalyst 38xx",
+            "Catalyst 3560","Catalyst 3650","Catalyst 3850",
+            "Catalyst 4506","Catalyst 4507","Catalyst 4510","Catalyst 4500",
+            "Catalyst 6506","Catalyst 6509","Catalyst 65xx",
+            "C9200","C9300","C9500","Catalyst 9200","Catalyst 9300","Catalyst 9500",
+            # Routers
+            "ISR 2811","ISR 2911","ISR 2951","ISR 3925","ISR 3945",
+            "ISR 4331","ISR 4351","ISR 4431","ISR 4451","ISR4451",
+            "Catalyst 8300","ASR 1001",
+            # Nexus
+            "Nexus 9372","Nexus 3172",
+            # IOS versions in estate
+            "IOS","IOS XE",
+        ],
+        "eol_products": [
+            # EOL ASA versions (9.1, 9.2, 9.6, 9.8 on some platforms)
+            "ASA 5510","ASA 5550",
+            # EOL Switches
+            "Catalyst 2960","Catalyst 37xx","Catalyst 3560","Catalyst 6509",
+            "Catalyst 6506","Catalyst 65xx","Catalyst 4506","Catalyst 4507",
+            # EOL Routers
+            "ISR 2811","ISR 2911","ISR 2951","ISR 3925","ISR 3945",
+        ]
+    },
+    "fortinet": {
+        "tier": "network",
+        "products": ["FortiGate","FortiOS","FortiClient","FortiClient VPN",
+                     "FortiManager","FortiAnalyzer","FortiNAC"],
+        "eol_products": []
+    },
+
+    # ── SERVERS & OS ───────────────────────────────────────────────────────────
+    "microsoft": {
+        "tier": "server",
+        "products": [
+            "Windows Server","Windows 2019","Windows 2022","Windows 2016",
+            "Windows 2012","Active Directory","Domain Controller",
+            "SQL Server","IIS","MSXML","Office 365","Outlook","Excel",
+            "PowerPoint","Word","Publisher","Access","Visio","OneNote",
+            "Skype for Business","Teams","Edge","OneDrive",
+            "System Center","SCCM","Silverlight","Visual Studio",
+        ],
+        "eol_products": [
+            # EOL — no more security patches
+            "Windows 2012","Windows Server 2012","Windows 2008",
+            "Silverlight","Visual Studio 2008",
+        ]
+    },
+    "vmware": {
+        "tier": "server",
+        "products": ["ESX","ESXi","vSphere","Horizon Client","Horizon",
+                     "VMware Tools","vCenter","Workspace ONE"],
+        "eol_products": []
+    },
+    "netapp": {
+        "tier": "server",
+        "products": ["NetApp","ONTAP","NetApp Cluster","NFS","CIFS"],
+        "eol_products": []
+    },
+    "oracle": {
+        "tier": "server",
+        "products": ["Oracle Linux","WebLogic","Oracle DB","Java","JDK",
+                     "Oracle Linux Server"],
+        "eol_products": [
+            "WebLogic 10.3","WebLogic 12.2.1.3",
+        ]
+    },
+    "linux": {
+        "tier": "server",
+        "products": ["Linux","Red Hat","RHEL","CentOS","Ubuntu","Debian",
+                     "net-snmp","OpenSSL","curl","libcurl","glibc",
+                     "kernel","OpenSSH","httpd","Apache"],
+        "eol_products": [
+            "CentOS 6","CentOS 7","RHEL 6","RHEL 7","Ubuntu 18.04",
+        ]
+    },
+
+    # ── ENDPOINT / APPS ────────────────────────────────────────────────────────
+    "citrix": {
+        "tier": "endpoint",
+        "products": ["Citrix Workspace","Citrix ADC","NetScaler",
+                     "Citrix Gateway","XenApp","XenDesktop","Virtual Apps",
+                     "Citrix Online Plugin","Self-Service"],
+        "eol_products": [
+            "Citrix Online Plugin","XenApp 6","XenDesktop 7.6",
+        ]
+    },
+    "palo alto": {
+        "tier": "endpoint",
+        "products": ["GlobalProtect","PAN-OS","Cortex XDR","Prisma"],
+        "eol_products": [
+            "GlobalProtect 5.2",  # 5.2.12 in estate — EOL
+        ]
+    },
+    "ivanti": {
+        "tier": "endpoint",
+        "products": ["Pulse Secure","Ivanti Connect Secure","Ivanti VPN",
+                     "Ivanti Secure Access","Pulse Application Launcher"],
+        "eol_products": [
+            "Pulse Secure 9.1",  # CRITICAL EOL — actively exploited
+        ]
+    },
+    "crowdstrike": {
+        "tier": "endpoint",
+        "products": ["CrowdStrike Falcon","Falcon Sensor","CrowdStrike Windows Sensor"],
+        "eol_products": []
+    },
+    "apache": {
+        "tier": "app",
+        "products": ["Log4j","Log4j2","Tomcat","Apache HTTP","Struts",
+                     "Log4j Core","log4j"],
+        "eol_products": [
+            "Log4j 1.x","Log4j 1.2",  # EOL — critical, 2055 installs in estate
+            "Tomcat 6","Tomcat 7","Tomcat 8",
+        ]
+    },
+    "verint": {
+        "tier": "app",
+        "products": ["Verint","Impact360","Workforce Optimization","WFO",
+                     "Verint Desktop","Verint Recorder"],
+        "eol_products": []
+    },
+    "avaya": {
+        "tier": "app",
+        "products": ["Avaya","Communication Manager","Avaya AES","Session Manager",
+                     "Avaya CMS","Avaya Agent","Media Gateway","G430","G450"],
+        "eol_products": [
+            "Communication Manager 6","Communication Manager 7",
+        ]
+    },
+    "genesys": {
+        "tier": "app",
+        "products": ["Genesys","GenesysCloud","CCPulse","Outbound Contact",
+                     "Genesys Workspace"],
+        "eol_products": []
+    },
+    "sap": {
+        "tier": "app",
+        "products": ["SAP","BusinessObjects","SAP GUI","WebLogic","HANA",
+                     "SAP Crystal Reports"],
+        "eol_products": [
+            "BusinessObjects 4.0","BusinessObjects 4.1",
+        ]
+    },
+    "mozilla": {
+        "tier": "endpoint",
+        "products": ["Firefox","Firefox ESR","Thunderbird"],
+        "eol_products": []
+    },
+    "zscaler": {
+        "tier": "endpoint",
+        "products": ["Zscaler","Zscaler Client Connector","ZIA","ZPA"],
+        "eol_products": []
+    },
+    "netskope": {
+        "tier": "endpoint",
+        "products": ["Netskope","Netskope Client"],
+        "eol_products": []
+    },
+    "adobe": {
+        "tier": "endpoint",
+        "products": ["Adobe Acrobat","Adobe Reader","Illustrator","Photoshop",
+                     "Adobe Bridge","Adobe Substance","Adobe Creative Cloud"],
+        "eol_products": []
+    },
+    "arista": {
+        "tier": "network",
+        "products": ["Arista","EOS"],
+        "eol_products": []
+    },
+    "brocade": {
+        "tier": "network",
+        "products": ["Brocade","ICX","Ruckus"],
+        "eol_products": [
+            "ICX 6450",  # EOL switch in estate
+        ]
+    },
+}
+
+# Flat lookup: normalised keyword → (vendor_key, tier, eol_list)
+# Built once at startup for O(1) matching during advisory processing
+_CNX_VENDOR_KEYWORDS: dict = {}
+_CNX_PRODUCT_KEYWORDS: list = []  # list of (keyword_lower, vendor_key, is_eol)
+
+def _build_cnx_lookup():
+    for vendor_key, info in CNX_STACK.items():
+        # Vendor name itself
+        _CNX_VENDOR_KEYWORDS[vendor_key.lower()] = vendor_key
+        for prod in info["products"]:
+            is_eol = prod in info.get("eol_products", [])
+            _CNX_PRODUCT_KEYWORDS.append((prod.lower(), vendor_key, is_eol))
+        for prod in info.get("eol_products", []):
+            _CNX_PRODUCT_KEYWORDS.append((prod.lower(), vendor_key, True))
+_build_cnx_lookup()
+
+
+def match_cnx_stack(advisory: dict) -> dict:
+    """
+    Check if an advisory affects Concentrix's asset inventory.
+    Returns dict: {matched: bool, vendors: list, tier: str, eol: bool, eol_products: list}
+    Matches against: advisory vendor, title, summary, affected_products
+    """
+    text = " ".join([
+        (advisory.get("vendor") or ""),
+        (advisory.get("title") or ""),
+        (advisory.get("summary") or ""),
+        " ".join(advisory.get("products") or []),
+        (advisory.get("source") or ""),
+    ]).lower()
+
+    matched_vendors = set()
+    matched_tier = None
+    is_eol = False
+    eol_products = []
+
+    # Check vendor-level match first (fast)
+    adv_vendor = (advisory.get("vendor") or "").lower()
+    for keyword, vendor_key in _CNX_VENDOR_KEYWORDS.items():
+        if keyword in adv_vendor or keyword in text:
+            matched_vendors.add(vendor_key)
+            matched_tier = CNX_STACK[vendor_key]["tier"]
+
+    # Check product-level match (more precise)
+    for prod_kw, vendor_key, prod_eol in _CNX_PRODUCT_KEYWORDS:
+        if prod_kw in text:
+            matched_vendors.add(vendor_key)
+            matched_tier = CNX_STACK[vendor_key]["tier"]
+            if prod_eol:
+                is_eol = True
+                eol_products.append(prod_kw)
+
+    # Special: Log4j is critical — always flag
+    if "log4j" in text or "log4shell" in text or "cve-2021-44228" in (advisory.get("cve") or "").lower():
+        matched_vendors.add("apache")
+        matched_tier = "app"
+        is_eol = True
+        eol_products.append("log4j 1.x")
+
+    if not matched_vendors:
+        return {"matched": False}
+
+    return {
+        "matched": True,
+        "vendors": sorted(matched_vendors),
+        "tier": matched_tier,
+        "eol": is_eol,
+        "eol_products": list(set(eol_products)),
+    }
+
+
 # ─── TRUSTED FEED REGISTRY ───────────────────────────────────────────────────
 TRUSTED_FEEDS = {
 
@@ -1265,6 +1532,13 @@ def normalise_entry(entry, source:str) -> dict:
     advisory["kev_due_date"]   = ""
     advisory["required_action"]= ""
     advisory["kev_notes"]      = ""
+    # CNX Stack matching — tag advisories affecting Concentrix's actual environment
+    cnx = match_cnx_stack(advisory)
+    advisory["cnxStack"]       = cnx.get("matched", False)
+    advisory["cnxTier"]        = cnx.get("tier", "")
+    advisory["cnxEol"]         = cnx.get("eol", False)
+    advisory["cnxEolProducts"] = cnx.get("eol_products", [])
+    advisory["cnxVendors"]     = cnx.get("vendors", [])
     return advisory
 
 # ─── FETCH ────────────────────────────────────────────────────────────────────
@@ -2167,6 +2441,17 @@ def fetch_all_advisories() -> list:
         results = enrich_with_vulncheck(results)
     except Exception as e:
         log.warning(f"[VulnCheck] Enrichment failed (non-fatal): {e}")
+    # Final CNX Stack pass — re-run after enrichment fills in vendor/product fields
+    cnx_count = 0
+    for a in results:
+        cnx = match_cnx_stack(a)
+        a["cnxStack"]       = cnx.get("matched", False)
+        a["cnxTier"]        = cnx.get("tier", "")
+        a["cnxEol"]         = cnx.get("eol", False)
+        a["cnxEolProducts"] = cnx.get("eol_products", [])
+        a["cnxVendors"]     = cnx.get("vendors", [])
+        if a["cnxStack"]: cnx_count += 1
+    log.info(f"[CNX-STACK] {cnx_count}/{len(results)} advisories matched to CNX asset inventory")
     return results
 
 # ─── AUTH ─────────────────────────────────────────────────────────────────────
