@@ -460,32 +460,29 @@ def supa_purge_old_acks():
         log.info("[SUPABASE] Old acks purged")
     except Exception as e: log.error(f"[SUPABASE] purge_acks: {e}")
 
-# ─── TRUSTED FEED REGISTRY (86 sources) ──────────────────────────────────────
+# ─── TRUSTED FEED REGISTRY ───────────────────────────────────────────────────
 TRUSTED_FEEDS = {
 
     # ══ TIER 0: MASTER AGGREGATORS — pre-NVD sources for fast CVE response ═
     "cvefeed_high_critical": "https://cvefeed.io/rssfeed/severity/high.xml",
-    "github_advisories":     "https://github.blog/feed/",
-    "cvedaily_all":          "https://cvedaily.com/feed.xml",
-    "cvedaily_new":          "https://cvedaily.com/feed-new.xml",
-    "cvedaily_critical":     "https://cvedaily.com/feed-critical.xml",
+    "cvedaily_critical":     "https://cvedaily.com/feed-critical.xml",   # critical only — cvedaily_all/new removed (duplication)
     # PRE-NVD: these publish CVEs hours–days before NIST NVD enriches them
-    "ghsa":                  "__GHSA_API__",       # GitHub Advisory Database API
-    "osv":                   "__OSV_API__",        # Google OSV.dev API
-    "mitre_cve":             "__MITRE_CVE_API__",  # MITRE CVE List (cvelistV5)
-    "cvelist_github":        "__CVELIST_GITHUB__", # CVEProject/cvelistV5 — ALL CVEs within 1-2h
-    "vulncheck_nvd":         "__VULNCHECK_API__",  # VulnCheck NVD++ — faster + richer than NIST NVD
-    "vulncheck_kev":         "__VULNCHECK_KEV__",  # VulnCheck KEV — superset of CISA KEV + exploit intel
+    "ghsa":          "__GHSA_API__",       # GitHub Advisory Database API
+    "osv":           "__OSV_API__",        # Google OSV.dev API
+    "mitre_cve":     "__MITRE_CVE_API__",  # MITRE CVE List (cvelistV5)
+    "cvelist_github":"__CVELIST_GITHUB__", # CVEProject/cvelistV5 — ALL CVEs within 1-2h
+    "vulncheck_nvd": "__VULNCHECK_API__",  # VulnCheck NVD++ — faster + richer than NIST NVD
+    "vulncheck_kev": "__VULNCHECK_KEV__",  # VulnCheck KEV — superset of CISA KEV + exploit intel
 
     # ══ GOVERNMENT & CERT ════════════════════════════════════════════════════
-    "cisa_alerts":       "https://www.cisa.gov/cybersecurity-advisories/all.xml",
-    "cisa_kev":          "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
-    "cisa_ics":          "https://www.cisa.gov/cybersecurity-advisories/ics-advisories.xml",
-    "ncsc_uk":           "https://www.ncsc.gov.uk/api/1/services/v1/report-rss-feed.xml",
-    "cert_eu":           "https://cert.europa.eu/publications/security-advisories-rss",
+    "cisa_alerts":        "https://www.cisa.gov/cybersecurity-advisories/all.xml",
+    "cisa_kev":           "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
+    "cisa_ics":           "https://www.cisa.gov/cybersecurity-advisories/ics-advisories.xml",
+    "ncsc_uk":            "https://www.ncsc.gov.uk/api/1/services/v1/report-rss-feed.xml",
+    "cert_eu":            "https://cert.europa.eu/publications/security-advisories-rss",
     "certeu_threat_intel":"https://cert.europa.eu/publications/threat-intelligence-rss",
-    "cert_in":           "https://www.cert-in.org.in/RSS/Vulnerability_Notes.xml",
-    "sans_isc":          "https://isc.sans.edu/rssfeed.xml",
+    "cert_in":            "https://www.cert-in.org.in/RSS/Vulnerability_Notes.xml",
+    "sans_isc":           "https://isc.sans.edu/rssfeed.xml",
 
     # ══ CVE / EXPLOIT DATABASES ══════════════════════════════════════════════
     "exploit_db":    "https://www.exploit-db.com/rss.xml",
@@ -494,70 +491,71 @@ TRUSTED_FEEDS = {
     "vuldb":         "https://vuldb.com/?rss.recent",
 
     # ══ OS & PLATFORM ════════════════════════════════════════════════════════
-    "msrc":         "https://api.msrc.microsoft.com/update-guide/rss",
-    "msrc_blog":    "https://msrc.microsoft.com/blog/feed/",
-    "ms_azure":     "https://techcommunity.microsoft.com/t5/s/gxcuf89792/rss/board?board.id=MicrosoftSecurityandCompliance",
-    "apple":        "https://support.apple.com/en-in/rss/securityupdates.rss",
-    "ubuntu":       "https://ubuntu.com/security/notices/rss.xml",
-    "android":      "https://security.googleblog.com/feeds/posts/default",
-    "redhat":       "https://access.redhat.com/security/security-updates/security-advisories.rss",
-    "debian":       "https://www.debian.org/security/dsa-long",
-    "docker":       "https://www.docker.com/blog/category/security/feed/",
+    "msrc":      "https://api.msrc.microsoft.com/update-guide/rss",
+    "msrc_blog": "https://msrc.microsoft.com/blog/feed/",
+    "ms_azure":  "https://azurecomcdn.azureedge.net/en-us/updates/feed/",          # Azure Updates (security tagged)
+    "apple":     "https://support.apple.com/en-in/rss/securityupdates.rss",
+    "ubuntu":    "https://ubuntu.com/security/notices/rss.xml",
+    "android":   "https://source.android.com/docs/security/bulletin/feed.xml",     # Fixed: was security blog, now bulletin feed
+    "redhat":    "https://access.redhat.com/security/security-updates/security-advisories.rss",
+    "debian":    "https://www.debian.org/security/dsa-long",
 
     # ══ NETWORK & FIREWALL ═══════════════════════════════════════════════════
-    "cisco":        "https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml",
-    "fortinet":     "https://www.fortiguard.com/rss/ir.xml",
-    "paloalto":     "https://security.paloaltonetworks.com/rss.xml",
-    "sonicwall":    "https://blog.sonicwall.com/feed/",
-    "ivanti":       "https://www.ivanti.com/blog/topics/security-advisory/rss",
-    "f5":           "https://support.f5.com/rss/security-advisories.xml",
-    "checkpoint":   "https://research.checkpoint.com/feed/",
-    "juniper":      "https://kb.juniper.net/JSA/rss",
-    "citrix":       "https://support.citrix.com/feed/news",
-    "aruba":        "https://support.hpe.com/hpesc/public/home/rss?docType=Security+Bulletin&sort=modified",
-    "netgear":      "https://kb.netgear.com/app/answers/detail/a_id/62001",
-    "zyxel":        "https://www.zyxel.com/global/en/support/security-advisories.shtml",
+    "cisco":     "https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml",
+    "fortinet":  "https://www.fortiguard.com/rss/ir.xml",
+    "paloalto":  "https://security.paloaltonetworks.com/rss.xml",
+    "sonicwall": "https://psirt.global.sonicwall.com/vuln-list",                   # Fixed: was blog, now PSIRT
+    "ivanti":    "https://forums.ivanti.com/s/article/Ivanti-Security-Advisories",  # No RSS — fetched via HTML scrape fallback
+    "f5":        "https://support.f5.com/rss/security-advisories.xml",
+    "checkpoint":"https://advisories.checkpoint.com/feeds.xml",                     # Fixed: was research blog
+    "juniper":   "https://supportportal.juniper.net/s/feed/0D5i000000pN0CRCA0",
+    "citrix":    "https://support.citrix.com/feed/news",
+    "aruba":     "https://support.hpe.com/hpesc/public/home/rss?docType=Security+Bulletin&sort=modified",
+    "zyxel":     "https://www.zyxel.com/global/en/support/security-advisories/rss",
 
     # ══ ENDPOINT SECURITY ════════════════════════════════════════════════════
-    "crowdstrike_blog":       "https://www.crowdstrike.com/blog/feed/",
-    "sentinelone":            "https://www.sentinelone.com/labs/feed/",
-    "sophos":                 "https://www.sophos.com/en-us/security-advisories.xml",
-    "trendmicro":             "https://feeds.feedburner.com/Anti-MalwareBlog",
-    "trellix":                "https://www.trellix.com/en-us/rss/security-advisories.xml",
-    "malwarebytes":           "https://www.malwarebytes.com/blog/feed/",
-    "eset":                   "https://www.welivesecurity.com/en/feed/",
+    "sophos":        "https://www.sophos.com/en-us/security-advisories.xml",
+    "trendmicro":    "https://success.trendmicro.com/dcx/s/feed/advisories?language=en_US",  # Fixed: was feedburner blog
+    "trellix":       "https://www.trellix.com/en-us/rss/security-advisories.xml",
+    "crowdstrike_blog": "https://www.crowdstrike.com/blog/feed/",
 
-    # ══ CLOUD & BROWSER ══════════════════════════════════════════════════════
-    "aws":          "https://aws.amazon.com/security/security-bulletins/feed/",
-    "gcp":          "https://cloud.google.com/feeds/gke-security-bulletins.xml",
-    "chrome":       "https://chromereleases.googleblog.com/feeds/posts/default",
-    "project_zero": "https://googleprojectzero.blogspot.com/feeds/posts/default",
-    "cloudflare":   "https://blog.cloudflare.com/tag/security/rss/",
-    "okta":         "https://developer.okta.com/feed.xml",
+    # ══ CLOUD & INFRASTRUCTURE ═══════════════════════════════════════════════
+    "aws":   "https://aws.amazon.com/security/security-bulletins/feed/",
+    "gcp":   "https://cloud.google.com/feeds/gke-security-bulletins.xml",
+    "chrome":"https://chromereleases.googleblog.com/feeds/posts/default",
 
-    # ══ MIDDLEWARE / DB ═══════════════════════════════════════════════════════
-    "mozilla":      "https://blog.mozilla.org/security/feed/",
-    "openssl":      "https://www.openssl.org/news/secadv/",
-    "apache":       "https://blogs.apache.org/security/feed/entries/rss",
-    "oracle":       "https://www.kb.cert.org/vuls/atomfeed/",
-    "vmware":       "https://community.broadcom.com/blogs/rss/4",
-    "splunk":       "https://advisory.splunk.com/feed.xml",
-    "veeam":        "https://www.veeam.com/rss/security-advisories.xml",
-    "nginx":        "https://nginx.org/en/security_advisories.html",
+    # ══ MIDDLEWARE / DB / OPEN SOURCE ════════════════════════════════════════
+    "mozilla":  "https://blog.mozilla.org/security/feed/",
+    "openssl":  "https://www.openssl.org/news/secadv/rss.xml",                      # Fixed: was HTML page
+    "apache":   "https://blogs.apache.org/security/feed/entries/rss",
+    "oracle":   "https://www.oracle.com/security-alerts/rss.xml",                   # Fixed: was CERT/CC
+    "vmware":   "https://community.broadcom.com/blogs/rss/4",
+    "splunk":   "https://advisory.splunk.com/feed.xml",
+    "veeam":    "https://www.veeam.com/rss/security-advisories.xml",
+    "nginx":    "https://nginx.org/en/security_advisories.html",                    # HTML only — kept for link tracking
+
+    # ══ ENTERPRISE APPS (NEW) ════════════════════════════════════════════════
+    "sap":       "https://dam.sap.com/mac/app/e/rss/link.htm?fid=73554900100800001281",  # SAP Security Notes RSS
+    "adobe":     "https://helpx.adobe.com/security/security-bulletin.rss",               # Adobe PSIRT
+    "atlassian": "https://confluence.atlassian.com/security/rss.xml",                    # Atlassian Security Advisories
+    "gitlab":    "https://about.gitlab.com/security/feed.xml",                           # GitLab Security Releases
+    "solarwinds":"https://www.solarwinds.com/shared-content/rss-feed/solarwinds-cve-rss-feed.xml",
+    "forescout": "https://www.forescout.com/resources/feed/?type=advisory",
+
+    # ══ ICS / OT (NEW) ═══════════════════════════════════════════════════════
+    "siemens_ics":      "https://cert-portal.siemens.com/productcert/rss/advisories.atom",  # Siemens ProductCERT
+    "schneider_ics":    "https://download.schneider-electric.com/files?p_Doc_Ref=SEVD-RSS",  # Schneider Electric PSIRT
 
     # ══ YOUR STACK ═══════════════════════════════════════════════════════════
-    "netskope":     "https://www.netskope.com/blog/feed",
-    "proofpoint":   "https://www.proofpoint.com/us/rss.xml",
-    "solarwinds":   "https://www.solarwinds.com/shared-content/rss-feed/solarwinds-cve-rss-feed.xml",
-    "forescout":    "https://www.forescout.com/resources/feed/?type=advisory",
+    "proofpoint": "https://www.proofpoint.com/us/rss.xml",
 
     # ══ THREAT INTEL ══════════════════════════════════════════════════════════
-    "mandiant":     "https://www.mandiant.com/resources/blog/rss.xml",
-    "talos":        "https://feeds.feedburner.com/feedburner/Talos",
-    "unit42":       "https://unit42.paloaltonetworks.com/feed/",
-    "msft_ti":      "https://www.microsoft.com/en-us/security/blog/feed/",
-    "secureworks":  "https://www.secureworks.com/rss?feed=blog",
-    "recorded_fut": "https://therecord.media/feed/",
+    "mandiant":    "https://www.mandiant.com/resources/blog/rss.xml",
+    "talos":       "https://feeds.feedburner.com/feedburner/Talos",
+    "unit42":      "https://unit42.paloaltonetworks.com/feed/",
+    "msft_ti":     "https://www.microsoft.com/en-us/security/blog/feed/",
+    "secureworks": "https://www.secureworks.com/rss?feed=blog",
+    "recorded_fut":"https://therecord.media/feed/",
 
     # ══ NEWS & COMMUNITY ══════════════════════════════════════════════════════
     "krebs":        "https://krebsonsecurity.com/feed/",
@@ -569,8 +567,16 @@ TRUSTED_FEEDS = {
     "ars_security": "https://arstechnica.com/security/feed/",
     "wired_sec":    "https://www.wired.com/feed/category/security/latest/rss",
     "schneier":     "https://www.schneier.com/feed/atom/",
-    "reddit_netsec":"https://www.reddit.com/r/netsec/.rss",
-    "threatpost":   "https://threatpost.com/feed/",
+
+    # ══ RESEARCH / BLOGS (NEWS_SOURCES classification) ═══════════════════════
+    "eset":         "https://www.welivesecurity.com/en/feed/",
+    "malwarebytes": "https://www.malwarebytes.com/blog/feed/",
+    "netskope":     "https://www.netskope.com/blog/feed",
+    "sentinelone":  "https://www.sentinelone.com/labs/feed/",
+    "project_zero": "https://googleprojectzero.blogspot.com/feeds/posts/default",
+    "cloudflare":   "https://blog.cloudflare.com/tag/security/rss/",
+    "okta":         "https://developer.okta.com/feed.xml",
+    "docker":       "https://www.docker.com/blog/category/security/feed/",
 }
 
 SOURCE_COUNT = len(TRUSTED_FEEDS)
@@ -578,21 +584,23 @@ SOURCE_COUNT = len(TRUSTED_FEEDS)
 # OEM/Vendor Tier 1 — direct vendor PSIRTs (structured, authoritative)
 OEM_TIER1 = {
     # Endpoint / OS
-    "msrc","sophos","apple","ubuntu","redhat","android","trellix","sentinelone","crowdstrike",
+    "msrc","sophos","apple","ubuntu","redhat","debian","android","trellix","trendmicro",
     # Network / Firewall
-    "cisco","fortinet","paloalto","juniper","f5","sonicwall","checkpoint","aruba",
-    # Identity / Access
+    "cisco","fortinet","paloalto","juniper","f5","sonicwall","checkpoint","aruba","zyxel",
+    # Identity / Access / Remote
     "ivanti","citrix",
     # Virtualisation / Cloud
-    "vmware","aws","gcp",
+    "vmware","aws","gcp","ms_azure",
     # Enterprise Apps
-    "oracle","sap","adobe","splunk","veeam","solarwinds","prtg","netscout",
+    "oracle","sap","adobe","splunk","veeam","solarwinds","forescout",
+    # Collaboration / DevOps
+    "atlassian","gitlab",
     # Browser / Runtime
-    "mozilla","openssl","chrome",
+    "mozilla","openssl","chrome","apache",
     # Government / CERT
     "cisa_kev","cisa_alerts","cisa_ics","ncsc_uk","cert_eu","cert_in",
-    # Your Stack
-    "forescout",
+    # ICS / OT
+    "siemens_ics","schneider_ics",
     # Blog variants (structured advisories mixed with posts)
     "msrc_blog",
     # Pre-NVD aggregators (authoritative CVE data)
@@ -608,6 +616,8 @@ RESEARCH_SOURCES = {
     "zdi_published",  # Zero Day Initiative — vendor-notified but not always patched
     "zdi_upcoming",   # ZDI upcoming disclosures — definitely no patch yet
     "exploit_db",     # Exploit-DB — PoC exploit published, may predate vendor patch
+    "project_zero",   # Google Project Zero — advanced research, often pre-patch
+    "vuldb",          # VulDB — aggregator, mix of early disclosures
 }
 
 # ─── STARTUP LOG ──────────────────────────────────────────────────────────────
@@ -631,26 +641,26 @@ ZERO_DAY_SOURCES = {
 
 # News/blog sources — these are articles, not structured advisories
 NEWS_SOURCES = {
-    # General security news sites — articles only, no CVE IDs
+    # General security news
     "krebs","bleeping","hackernews","securityweek","darkreading","helpnetsec",
-    "ars_security","wired_sec","reddit_netsec","threatpost","schneier",
-    "cybersecnews","gbhackers","cyberinsider","qualys_blog","sans_isc",
-    # Threat intelligence & research blogs (articles, not structured advisories)
+    "ars_security","wired_sec","schneier","sans_isc",
+    # Threat intelligence blogs (articles, not structured advisories)
     "mandiant","talos","unit42","msft_ti","secureworks","recorded_fut",
-    "crowdstrike_blog",   # CrowdStrike blog (Patch Tuesday analysis etc.)
-    "msrc_blog",          # MSRC blog posts (msrc feed = structured advisories, kept separate)
-    "sentinelone",        # SentinelLabs threat research
-    "malwarebytes",       # Malwarebytes Labs research
-    "eset",               # ESET threat research
-    "project_zero",       # Google Project Zero research
-    "cloudflare",         # Cloudflare security blog
-    "proofpoint",         # Proofpoint threat intel blog
-    "certeu_threat_intel",# CERT-EU threat intelligence reports
-    "okta",               # developer.okta.com/feed.xml — developer blog, not a PSIRT feed
-    "eset",               # WeLiveSecurity (ESET blog) — threat research articles, not PSIRT
-    "malwarebytes",       # Malwarebytes Labs — research blog, not structured PSIRT
-    "netskope",           # Netskope blog — research articles
-    "docker",             # Docker security blog — articles, not structured advisories
+    "crowdstrike_blog",
+    "msrc_blog",
+    # Vendor research / blog feeds (not PSIRTs)
+    "sentinelone",    # SentinelLabs threat research blog
+    "malwarebytes",   # Malwarebytes Labs blog
+    "eset",           # WeLiveSecurity (ESET) blog
+    "netskope",       # Netskope blog
+    "docker",         # Docker security blog
+    "okta",           # Okta developer blog
+    "cloudflare",     # Cloudflare security blog
+    "proofpoint",     # Proofpoint threat intel blog
+    "certeu_threat_intel",
+    "ms_azure",       # Azure Updates — general updates, not structured CVE advisories
+    "cvedaily_critical",  # CVEDaily aggregator — news-style CVE summaries
+    "cvefeed_high_critical",  # CVEFeed aggregator
 }
 
 SEVERITY_KEYWORDS = {
@@ -905,7 +915,7 @@ def _title_fingerprint(title:str) -> str:
               "security","advisory","update","patch","vulnerability","issue","fixes"}]
     return " ".join(sorted(words[:8]))  # sort so word-order differences don't matter
 
-VENDOR_NORMALISE={"microsoft corporation":"Microsoft","microsoft corp":"Microsoft","msrc":"Microsoft","cisco systems":"Cisco","cisco systems, inc.":"Cisco","google llc":"Google","google inc":"Google","apple inc":"Apple","apple inc.":"Apple","oracle corporation":"Oracle","oracle corp":"Oracle","adobe inc":"Adobe","vmware inc":"VMware","vmware, inc":"VMware","fortinet inc":"Fortinet","fortinet, inc":"Fortinet","palo alto networks":"Palo Alto Networks","check point software":"Check Point","f5 networks":"F5","f5, inc":"F5","citrix systems":"Citrix","solarwinds corporation":"SolarWinds","ivanti inc":"Ivanti","ivanti, inc":"Ivanti","red hat inc":"Red Hat","red hat, inc":"Red Hat","canonical ltd":"Canonical","apache software foundation":"Apache","the apache software foundation":"Apache","mozilla foundation":"Mozilla","mozilla corporation":"Mozilla","sap se":"SAP","siemens ag":"Siemens","schneider electric":"Schneider Electric"}
+VENDOR_NORMALISE={"microsoft corporation":"Microsoft","microsoft corp":"Microsoft","msrc":"Microsoft","cisco systems":"Cisco","cisco systems, inc.":"Cisco","google llc":"Google","google inc":"Google","apple inc":"Apple","apple inc.":"Apple","oracle corporation":"Oracle","oracle corp":"Oracle","adobe inc":"Adobe","vmware inc":"VMware","vmware, inc":"VMware","fortinet inc":"Fortinet","fortinet, inc":"Fortinet","palo alto networks":"Palo Alto Networks","check point software":"Check Point","f5 networks":"F5","f5, inc":"F5","citrix systems":"Citrix","solarwinds corporation":"SolarWinds","ivanti inc":"Ivanti","ivanti, inc":"Ivanti","red hat inc":"Red Hat","red hat, inc":"Red Hat","canonical ltd":"Canonical","apache software foundation":"Apache","the apache software foundation":"Apache","mozilla foundation":"Mozilla","mozilla corporation":"Mozilla","sap se":"SAP","siemens ag":"Siemens","schneider electric":"Schneider Electric","atlassian pty ltd":"Atlassian","atlassian corp":"Atlassian","gitlab inc":"GitLab","gitlab b.v.":"GitLab","sonicwall inc":"SonicWall","sonicwall, inc":"SonicWall","trend micro inc":"Trend Micro","trend micro, inc":"Trend Micro","veeam software":"Veeam","splunk inc":"Splunk","zyxel communications":"Zyxel","aruba networks":"Aruba","hewlett packard enterprise":"HPE"}
 def normalise_vendor(raw:str)->str:
     if not raw: return raw
     return VENDOR_NORMALISE.get(raw.strip().lower(),raw.strip())
@@ -917,26 +927,27 @@ SOURCE_PRIORITY = {
     "msrc":12, "cisco":12, "fortinet":12, "paloalto":12, "juniper":12,
     "ivanti":12, "vmware":12, "sap":12, "oracle":12, "adobe":12,
     "apple":12, "android":12, "chrome":12, "mozilla":12, "solarwinds":12,
-    "checkpoint":12, "f5":12, "citrix":12, "aruba":12, "netscout":12,
-    "crowdstrike":12, "sentinelone":12, "splunk":12, "prtg":12,
+    "checkpoint":12, "f5":12, "citrix":12, "aruba":12, "zyxel":12,
+    "splunk":12, "veeam":12, "sophos":12, "trellix":12, "trendmicro":12,
+    "atlassian":12, "gitlab":12, "debian":12, "redhat":12, "ubuntu":12,
+    "openssl":12, "apache":12, "nginx":12, "aws":12, "gcp":12,
+    "siemens_ics":12, "schneider_ics":12,                    # ICS/OT vendors
     # Government / Official
-    "cisa_kev":11,        # CISA KEV — exploited in wild confirmed
-    "vulncheck_kev":11,   # VulnCheck KEV — same tier
-    "nvd":10,             # NVD — official CVSS scores
+    "cisa_kev":11,
+    "vulncheck_kev":11,
+    "nvd":10,
     "nist_nvd":10,
     "cisa_alerts":9, "cisa_ics":9, "cert_eu":9, "cert_in":9,
-    "ghsa":9,             # GitHub Advisory — authoritative for OSS
-    "osv":8,              # Google OSV
+    "ghsa":9,
+    "osv":8,
     "mitre_cve":8,
-    "cvelist_github":4,   # MITRE CVEList via GitHub — fills gaps, low priority vs OEM/NVD
-    # Aggregators
-    "exploit_db":7,       # Has PoC/exploit info
-    "vulncheck_nvd":7,
-    "zdi_published":6, "zdi_upcoming":6,
-    "vuldb":5,
-    # Generic
-    "github_advisories":4,
-    "cvefeed_high_critical":3, "cvedaily_all":3, "cvedaily_critical":3,
+    "vulncheck_nvd":8,
+    "cvelist_github":4,
+    # Research / Exploit
+    "zdi_published":6, "zdi_upcoming":5, "exploit_db":6,
+    "project_zero":7, "vuldb":5,
+    # News/Intel
+    "sans_isc":5, "ncsc_uk":7,
 }
 
 def _src_priority(source:str) -> int:
@@ -3342,6 +3353,48 @@ def repair_severity():
         "corrections": corrected,
         "error_details": errors[:10],
     })
+
+
+@app.route("/create-indexes", methods=["GET"])
+def create_indexes():
+    """
+    One-time endpoint: creates performance indexes on advisory_cache via Supabase RPC.
+    Run once after deploy: /create-indexes?code=CNXadvisorySEC@123
+    Safe to run multiple times (IF NOT EXISTS).
+    """
+    provided = request.args.get("code","") or request.headers.get("X-Access-Code","")
+    if provided != ACCESS_CODE:
+        return jsonify({"error":"Unauthorised"}), 403
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return jsonify({"error":"Supabase not configured"}), 500
+
+    indexes = [
+        ("idx_advisory_severity_pub",
+         "CREATE INDEX IF NOT EXISTS idx_advisory_severity_pub ON advisory_cache(severity, published DESC)"),
+        ("idx_advisory_is_kev",
+         "CREATE INDEX IF NOT EXISTS idx_advisory_is_kev ON advisory_cache(is_kev) WHERE is_kev = true"),
+        ("idx_advisory_is_zero_day",
+         "CREATE INDEX IF NOT EXISTS idx_advisory_is_zero_day ON advisory_cache(is_zero_day) WHERE is_zero_day = true"),
+        ("idx_advisory_source",
+         "CREATE INDEX IF NOT EXISTS idx_advisory_source ON advisory_cache(source)"),
+        ("idx_advisory_published",
+         "CREATE INDEX IF NOT EXISTS idx_advisory_published ON advisory_cache(published DESC)"),
+        ("idx_advisory_is_archived",
+         "CREATE INDEX IF NOT EXISTS idx_advisory_is_archived ON advisory_cache(is_archived, published DESC)"),
+    ]
+
+    results = {}
+    for name, sql in indexes:
+        try:
+            r = requests.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/exec_sql",
+                headers={**supa_headers(), "Content-Type":"application/json"},
+                json={"query": sql}, timeout=15)
+            results[name] = "✅ created" if r.status_code in (200,201,204) else f"⚠️ {r.status_code}: {r.text[:100]}"
+        except Exception as e:
+            results[name] = f"❌ {e}"
+
+    return jsonify({"status":"complete","indexes":results})
 
 
 @app.route("/trigger-morning", methods=["GET","POST"])
