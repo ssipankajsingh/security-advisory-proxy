@@ -3840,9 +3840,11 @@ def delete_cnx_stack(vendor_key):
         return jsonify({"error":str(e)}), 500
 
 
-@app.route("/cnx-stack/seed", methods=["POST"])
+@app.route("/cnx-stack/seed", methods=["GET","POST"])
 def seed_cnx_stack():
-    """Seed Supabase cnx_stack_assets from the hardcoded dict (one-time setup)."""
+    """Seed Supabase cnx_stack_assets from the hardcoded dict (one-time setup).
+    Works via browser GET: /cnx-stack/seed?code=CNXadvisorySEC@123
+    """
     if not _check_auth(): return jsonify({"error":"Unauthorised"}), 403
     supa_seed_cnx_stack()
     global _CNX_STACK_LOADED
