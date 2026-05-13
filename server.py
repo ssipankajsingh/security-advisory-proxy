@@ -673,7 +673,11 @@ _CNX_STACK_LOADED = False
 def supa_load_cnx_stack() -> dict:
     """Load CNX Stack asset list from Supabase. Falls back to hardcoded CNX_STACK."""
     global _CNX_STACK_CACHE, _CNX_STACK_LOADED
+    if _CNX_STACK_LOADED:  # already attempted — don't retry on every call
+        return _CNX_STACK_CACHE if _CNX_STACK_CACHE else CNX_STACK
     if not (SUPABASE_URL and SUPABASE_KEY):
+        _CNX_STACK_LOADED = True
+        _CNX_STACK_CACHE = CNX_STACK
         return CNX_STACK
     try:
         r = requests.get(
@@ -696,34 +700,36 @@ def supa_load_cnx_stack() -> dict:
                 _CNX_STACK_LOADED = True
                 log.info(f"[CNX-STACK] Loaded {len(loaded)} vendors from Supabase")
                 return loaded
-        # Table may not exist yet — seed it from hardcoded dict
-        if r.status_code in (404, 400):
-            log.info("[CNX-STACK] Table not found — seeding from hardcoded dict")
-            supa_seed_cnx_stack()
+            else:
+                # Table exists but empty — seed it
+                log.info("[CNX-STACK] Table empty — seeding from hardcoded dict")
+                _CNX_STACK_LOADED = True  # set BEFORE seed to prevent loop
+                _CNX_STACK_CACHE = CNX_STACK
+                supa_seed_cnx_stack()
+        elif r.status_code in (404, 400, 406):
+            # Table doesn't exist yet — use hardcoded, stop retrying
+            log.warning("[CNX-STACK] Table not found — using hardcoded dict. "
+                        "Create table in Supabase dashboard: "
+                        "https://supabase.com/dashboard/project/cueubarivumvwftoyzdy/sql")
+            _CNX_STACK_LOADED = True  # prevent retry spam
+            _CNX_STACK_CACHE = CNX_STACK
+        else:
+            log.warning(f"[CNX-STACK] Load returned {r.status_code} — using hardcoded dict")
+            _CNX_STACK_LOADED = True
+            _CNX_STACK_CACHE = CNX_STACK
     except Exception as e:
-        log.warning(f"[CNX-STACK] Load failed: {e}")
-    return CNX_STACK
+        log.warning(f"[CNX-STACK] Load failed: {e} — using hardcoded dict")
+        _CNX_STACK_LOADED = True
+        _CNX_STACK_CACHE = CNX_STACK
+    return _CNX_STACK_CACHE or CNX_STACK
 
 def supa_seed_cnx_stack():
-    """Seed cnx_stack_assets table from the hardcoded CNX_STACK dict (one-time)."""
+    """Seed cnx_stack_assets table from the hardcoded CNX_STACK dict.
+    Table must already exist — create it manually in Supabase SQL editor first.
+    SQL: see /cnx-stack/sql endpoint for the CREATE TABLE statement.
+    """
     if not (SUPABASE_URL and SUPABASE_KEY): return
     try:
-        # Create table via RPC if it doesn't exist
-        create_sql = """
-        CREATE TABLE IF NOT EXISTS cnx_stack_assets (
-            id bigserial PRIMARY KEY,
-            vendor_key text UNIQUE NOT NULL,
-            tier text NOT NULL DEFAULT 'app',
-            products text[] DEFAULT '{}',
-            eol_products text[] DEFAULT '{}',
-            notes text DEFAULT '',
-            updated_at timestamptz DEFAULT now()
-        );
-        """
-        requests.post(f"{SUPABASE_URL}/rest/v1/rpc/exec_sql",
-            headers={**supa_headers(),"Content-Type":"application/json"},
-            json={"query": create_sql}, timeout=15)
-
         rows = []
         for vendor_key, info in CNX_STACK.items():
             rows.append({
@@ -736,9 +742,12 @@ def supa_seed_cnx_stack():
         r = requests.post(
             f"{SUPABASE_URL}/rest/v1/cnx_stack_assets",
             headers={**supa_headers(), "Prefer":"resolution=merge-duplicates"},
-            json=rows, timeout=15)
-        if r.status_code in (200,201):
+            json=rows, timeout=20)
+        if r.status_code in (200, 201):
             log.info(f"[CNX-STACK] ✅ Seeded {len(rows)} vendors to Supabase")
+            global _CNX_STACK_LOADED, _CNX_STACK_CACHE
+            _CNX_STACK_CACHE = {v["vendor_key"]:{"tier":v["tier"],"products":v["products"],"eol_products":v["eol_products"],"notes":""} for v in rows}
+            _CNX_STACK_LOADED = True
         else:
             log.warning(f"[CNX-STACK] Seed returned {r.status_code}: {r.text[:200]}")
     except Exception as e:
@@ -893,7 +902,7 @@ TRUSTED_FEEDS = {
     "atlassian": "https://confluence.atlassian.com/security/rss.xml",                    # Atlassian Security Advisories
     "gitlab":    "https://about.gitlab.com/security/feed.xml",                           # GitLab Security Releases
     "solarwinds":"https://www.solarwinds.com/shared-content/rss-feed/solarwinds-cve-rss-feed.xml",
-    "forescout": "https://www.forescout.com/resources/feed/?type=advisory",
+    "forescout": "https://www.forescout.com/company/resources/feed/",
 
     # ══ ICS / OT (NEW) ═══════════════════════════════════════════════════════
     "siemens_ics":      "https://cert-portal.siemens.com/productcert/rss/advisories.atom",  # Siemens ProductCERT
@@ -3724,6 +3733,42 @@ def repair_severity():
         "corrections": corrected,
         "error_details": errors[:10],
     })
+
+
+@app.route("/cnx-stack/sql", methods=["GET"])
+def cnx_stack_sql():
+    """Returns the SQL to create the cnx_stack_assets table in Supabase.
+    Run this once in Supabase SQL Editor, then hit /cnx-stack/seed to populate it.
+    No auth required — SQL is not sensitive.
+    """
+    sql = """-- Run this in Supabase SQL Editor:
+-- https://supabase.com/dashboard/project/cueubarivumvwftoyzdy/sql
+
+CREATE TABLE IF NOT EXISTS public.cnx_stack_assets (
+    id          bigserial PRIMARY KEY,
+    vendor_key  text UNIQUE NOT NULL,
+    tier        text NOT NULL DEFAULT 'app'
+                    CHECK (tier IN ('network','server','endpoint','app')),
+    products    text[] NOT NULL DEFAULT '{}',
+    eol_products text[] NOT NULL DEFAULT '{}',
+    notes       text DEFAULT '',
+    updated_at  timestamptz DEFAULT now()
+);
+
+-- Enable Row Level Security
+ALTER TABLE public.cnx_stack_assets ENABLE ROW LEVEL SECURITY;
+
+-- Allow all operations (proxy uses service key)
+CREATE POLICY "allow_all" ON public.cnx_stack_assets
+    FOR ALL USING (true) WITH CHECK (true);
+
+-- Index for fast vendor lookup
+CREATE INDEX IF NOT EXISTS idx_cnx_stack_vendor ON public.cnx_stack_assets(vendor_key);
+
+-- After running the above, seed the table:
+-- POST https://security-advisory-proxy.onrender.com/cnx-stack/seed?code=CNXadvisorySEC@123
+"""
+    return sql, 200, {"Content-Type": "text/plain"}
 
 
 @app.route("/cnx-stack", methods=["GET"])
