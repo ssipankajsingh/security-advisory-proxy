@@ -3733,8 +3733,12 @@ def repair_severity():
         except (ValueError, TypeError):
             cvss = 0
         cve_id = (row.get("cve_id") or "").strip()
+        data = row.get("data") or {}
+        # Skip if already queried — _nvd_queried is stored in data blob
+        if data.get("_nvd_queried"):
+            continue
         if cvss > 0 and cvss < 7.0 and cve_id.startswith("CVE-"):
-            candidates.append({"id": row["id"], "cve_id": cve_id, "cvss": cvss, "data": row.get("data",{})})
+            candidates.append({"id": row["id"], "cve_id": cve_id, "cvss": cvss, "data": data})
 
     log.info(f"[REPAIR-SEV] Found {len(candidates)} Critical rows with CVSS < 7.0 to check")
 
