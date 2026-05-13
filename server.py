@@ -1588,6 +1588,25 @@ def normalise_entry(entry, source:str) -> dict:
             is_oem = False  # strip OEM flag from blog posts
     cvss_score   = extract_cvss_v3(combined)
     severity_raw = parse_severity(combined, source=source, is_oem=is_oem)
+
+    # MSRC/vendor feeds include a <threat:Severity> or <vuln:Severity> XML field
+    # feedparser exposes these as entry.threat_severity, entry.vuln_severity etc.
+    # We read it but only trust it when CVSS confirms — otherwise it inflates severity.
+    # e.g. MSRC marks CVSS 3.7 as "Critical" in their portal (their own risk rating, not NVD)
+    vendor_sev_field = (
+        getattr(entry, "threat_severity", None) or
+        getattr(entry, "vuln_severity", None) or
+        getattr(entry, "dc_subject", None) or ""
+    ).strip().capitalize()
+    if vendor_sev_field in ("Critical","High","Medium","Low") and not cvss_score:
+        # No CVSS in feed — vendor severity label is our only signal.
+        # Cap OEM vendor self-reported severity at High (not Critical) unless NVD confirms.
+        # NVD enrichment will correct it later if it's genuinely Critical (CVSS >= 9)
+        if is_oem and vendor_sev_field == "Critical":
+            severity_raw = "High"   # conservative — NVD will promote to Critical if warranted
+        elif severity_raw == "Unknown":
+            severity_raw = vendor_sev_field
+
     # NEWS items capped at Medium — keyword matches on news titles inflate severity
     severity = min(["Critical","High","Medium","Low","Unknown"].index(severity_raw),
                    ["Critical","High","Medium","Low","Unknown"].index("Medium") if is_news else 0)
@@ -1752,7 +1771,7 @@ def enrich_missing_cvss_from_nvd(advisories:list)->list:
         # KEV items hardcoded Critical with no CVSS — enrich to get real score
         if a.get("isKev") and not a.get("cvss"): return True
         return False
-    needs=[a for a in advisories if _needs_nvd(a)][:30]
+    needs=[a for a in advisories if _needs_nvd(a)][:50]
     if not needs: return advisories
     log.info(f"[NVD-ENRICH] Querying {len(needs)} CVEs missing CVSS/severity")
     adv_map={a["cve"]:a for a in advisories if a.get("cve")}
@@ -3587,6 +3606,69 @@ def scheduled_patch_tuesday():
 # ─── FETCH-NOW ENDPOINT (for cron-job.org external trigger) ──────────────────
 _fetch_in_progress = threading.Event()
 
+def _mini_severity_repair(max_items:int=20):
+    """Quick severity correction pass — runs after each fetch cycle.
+    Only targets very recent items (last 24h) to catch newly ingested mis-classified items.
+    Nightly job handles older items.
+    """
+    if not (SUPABASE_URL and SUPABASE_KEY): return
+    import time as _t
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/advisory_cache"
+            f"?select=id,cve_id,cvss,data&severity=eq.Critical"
+            f"&published=gte.{cutoff}&limit={max_items}",
+            headers=supa_headers(), timeout=10)
+        rows = r.json() if r.status_code == 200 else []
+    except Exception: return
+
+    SEV_MAP = {(9.0,10.1):"Critical",(7.0,9.0):"High",(4.0,7.0):"Medium",(0.1,4.0):"Low"}
+    corrected = 0
+    for row in rows:
+        try:
+            cvss = float(row.get("cvss") or 0)
+        except: cvss = 0
+        cve_id = (row.get("cve_id") or "").strip()
+        data = row.get("data") or {}
+        if not (0 < cvss < 7.0 and cve_id.startswith("CVE-") and not data.get("_nvd_queried")):
+            continue
+        try:
+            resp = requests.get("https://services.nvd.nist.gov/rest/json/cves/2.0",
+                params={"cveId":cve_id}, timeout=10,
+                headers={"User-Agent":"SecurityAdvisoryProxy/2.0"})
+            if resp.status_code != 200: _t.sleep(0.7); continue
+            vulns = resp.json().get("vulnerabilities",[])
+            if not vulns: _t.sleep(0.7); continue
+            nvd_cvss = None; nvd_sev = None
+            for mk in ("cvssMetricV31","cvssMetricV30"):
+                for m in vulns[0].get("cve",{}).get("metrics",{}).get(mk,[]):
+                    if m.get("type") in ("Primary","Secondary"):
+                        nvd_cvss = m.get("cvssData",{}).get("baseScore")
+                        nvd_sev = m.get("cvssData",{}).get("baseSeverity","").capitalize()
+                        break
+                if nvd_cvss: break
+            if not nvd_cvss: _t.sleep(0.7); continue
+            correct_sev = nvd_sev or next((s for (lo,hi),s in SEV_MAP.items() if lo<=nvd_cvss<hi), None)
+            data["_nvd_queried"] = True
+            if correct_sev and correct_sev != "Critical":
+                data["severity"] = correct_sev
+                data["severity_corrected_by_nvd"] = True
+                requests.patch(
+                    f"{SUPABASE_URL}/rest/v1/advisory_cache?id=eq.{row['id']}",
+                    headers={**supa_headers(),"Prefer":"return=minimal"},
+                    json={"severity":correct_sev,"data":data}, timeout=8)
+                corrected += 1
+            else:
+                requests.patch(
+                    f"{SUPABASE_URL}/rest/v1/advisory_cache?id=eq.{row['id']}",
+                    headers={**supa_headers(),"Prefer":"return=minimal"},
+                    json={"data":data}, timeout=8)
+        except Exception: pass
+        _t.sleep(0.7)
+    if corrected: log.info(f"[MINI-REPAIR] ✅ Corrected {corrected} items post-fetch")
+
+
 def _background_fetch_and_cache():
     """Run a full feed fetch and save to Supabase. Called from /fetch-now."""
     if _fetch_in_progress.is_set():
@@ -3599,6 +3681,12 @@ def _background_fetch_and_cache():
         if SUPABASE_URL and advisories:
             supa_save_advisory_cache(advisories)
             log.info(f"[FETCH-NOW] ✅ Fetched {len(advisories)} advisories and saved to cache")
+            # Run a mini severity correction pass after each fetch (max 20 items)
+            # This catches new mis-classified items before next nightly repair
+            try:
+                _mini_severity_repair(max_items=20)
+            except Exception as _e:
+                log.debug(f"[FETCH-NOW] Mini repair skipped: {_e}")
         else:
             log.warning("[FETCH-NOW] No advisories fetched or Supabase not configured")
     except Exception as e:
