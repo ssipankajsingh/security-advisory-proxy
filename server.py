@@ -656,29 +656,108 @@ CNX_STACK = {
     },
 }
 
-# Flat lookup: normalised keyword → (vendor_key, tier, eol_list)
-# Built once at startup for O(1) matching during advisory processing
-_CNX_VENDOR_KEYWORDS: dict = {}
-_CNX_PRODUCT_KEYWORDS: list = []  # list of (keyword_lower, vendor_key, is_eol)
 
-def _build_cnx_lookup():
-    for vendor_key, info in CNX_STACK.items():
-        # Vendor name itself
-        _CNX_VENDOR_KEYWORDS[vendor_key.lower()] = vendor_key
-        for prod in info["products"]:
-            is_eol = prod in info.get("eol_products", [])
-            _CNX_PRODUCT_KEYWORDS.append((prod.lower(), vendor_key, is_eol))
-        for prod in info.get("eol_products", []):
-            _CNX_PRODUCT_KEYWORDS.append((prod.lower(), vendor_key, True))
-_build_cnx_lookup()
+# ── CNX Stack Supabase persistence ───────────────────────────────────────────
+# cnx_stack_assets table schema:
+#   id: bigint (auto)
+#   vendor_key: text (unique, e.g. "cisco")
+#   tier: text ("network"|"server"|"endpoint"|"app")
+#   products: text[] (list of product keywords)
+#   eol_products: text[] (subset of products that are EOL)
+#   notes: text (optional context)
+#   updated_at: timestamptz
+
+_CNX_STACK_CACHE: dict = {}   # in-memory cache loaded from Supabase
+_CNX_STACK_LOADED = False
+
+def supa_load_cnx_stack() -> dict:
+    """Load CNX Stack asset list from Supabase. Falls back to hardcoded CNX_STACK."""
+    global _CNX_STACK_CACHE, _CNX_STACK_LOADED
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return CNX_STACK
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/cnx_stack_assets?select=*&limit=200",
+            headers=supa_headers(), timeout=10)
+        if r.status_code == 200:
+            rows = r.json()
+            if rows:
+                loaded = {}
+                for row in rows:
+                    vk = row.get("vendor_key","").strip().lower()
+                    if not vk: continue
+                    loaded[vk] = {
+                        "tier":         row.get("tier","app"),
+                        "products":     row.get("products") or [],
+                        "eol_products": row.get("eol_products") or [],
+                        "notes":        row.get("notes",""),
+                    }
+                _CNX_STACK_CACHE = loaded
+                _CNX_STACK_LOADED = True
+                log.info(f"[CNX-STACK] Loaded {len(loaded)} vendors from Supabase")
+                return loaded
+        # Table may not exist yet — seed it from hardcoded dict
+        if r.status_code in (404, 400):
+            log.info("[CNX-STACK] Table not found — seeding from hardcoded dict")
+            supa_seed_cnx_stack()
+    except Exception as e:
+        log.warning(f"[CNX-STACK] Load failed: {e}")
+    return CNX_STACK
+
+def supa_seed_cnx_stack():
+    """Seed cnx_stack_assets table from the hardcoded CNX_STACK dict (one-time)."""
+    if not (SUPABASE_URL and SUPABASE_KEY): return
+    try:
+        # Create table via RPC if it doesn't exist
+        create_sql = """
+        CREATE TABLE IF NOT EXISTS cnx_stack_assets (
+            id bigserial PRIMARY KEY,
+            vendor_key text UNIQUE NOT NULL,
+            tier text NOT NULL DEFAULT 'app',
+            products text[] DEFAULT '{}',
+            eol_products text[] DEFAULT '{}',
+            notes text DEFAULT '',
+            updated_at timestamptz DEFAULT now()
+        );
+        """
+        requests.post(f"{SUPABASE_URL}/rest/v1/rpc/exec_sql",
+            headers={**supa_headers(),"Content-Type":"application/json"},
+            json={"query": create_sql}, timeout=15)
+
+        rows = []
+        for vendor_key, info in CNX_STACK.items():
+            rows.append({
+                "vendor_key":   vendor_key,
+                "tier":         info.get("tier","app"),
+                "products":     info.get("products",[]),
+                "eol_products": info.get("eol_products",[]),
+                "notes":        "",
+            })
+        r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/cnx_stack_assets",
+            headers={**supa_headers(), "Prefer":"resolution=merge-duplicates"},
+            json=rows, timeout=15)
+        if r.status_code in (200,201):
+            log.info(f"[CNX-STACK] ✅ Seeded {len(rows)} vendors to Supabase")
+        else:
+            log.warning(f"[CNX-STACK] Seed returned {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        log.error(f"[CNX-STACK] Seed failed: {e}")
+
+def _get_cnx_stack() -> dict:
+    """Get CNX Stack — Supabase if loaded, else hardcoded fallback."""
+    if _CNX_STACK_LOADED and _CNX_STACK_CACHE:
+        return _CNX_STACK_CACHE
+    return supa_load_cnx_stack()
 
 
 def match_cnx_stack(advisory: dict) -> dict:
     """
     Check if an advisory affects Concentrix's asset inventory.
     Returns dict: {matched: bool, vendors: list, tier: str, eol: bool, eol_products: list}
-    Matches against: advisory vendor, title, summary, affected_products
+    Uses Supabase cnx_stack_assets (with hardcoded fallback).
     """
+    stack = _get_cnx_stack()
     text = " ".join([
         (advisory.get("vendor") or ""),
         (advisory.get("title") or ""),
@@ -692,28 +771,35 @@ def match_cnx_stack(advisory: dict) -> dict:
     is_eol = False
     eol_products = []
 
-    # Check vendor-level match first (fast)
-    adv_vendor = (advisory.get("vendor") or "").lower()
-    for keyword, vendor_key in _CNX_VENDOR_KEYWORDS.items():
-        if keyword in adv_vendor or keyword in text:
+    for vendor_key, info in stack.items():
+        vk_lower = vendor_key.lower()
+        # Vendor-level match
+        if vk_lower in text:
             matched_vendors.add(vendor_key)
-            matched_tier = CNX_STACK[vendor_key]["tier"]
-
-    # Check product-level match (more precise)
-    for prod_kw, vendor_key, prod_eol in _CNX_PRODUCT_KEYWORDS:
-        if prod_kw in text:
-            matched_vendors.add(vendor_key)
-            matched_tier = CNX_STACK[vendor_key]["tier"]
-            if prod_eol:
+            matched_tier = info.get("tier", "app")
+        # Product-level match
+        for prod in (info.get("products") or []):
+            if prod.lower() in text:
+                matched_vendors.add(vendor_key)
+                matched_tier = info.get("tier", "app")
+                if prod in (info.get("eol_products") or []):
+                    is_eol = True
+                    eol_products.append(prod)
+        # EOL-specific match
+        for prod in (info.get("eol_products") or []):
+            if prod.lower() in text:
+                matched_vendors.add(vendor_key)
+                matched_tier = info.get("tier", "app")
                 is_eol = True
-                eol_products.append(prod_kw)
+                eol_products.append(prod)
 
-    # Special: Log4j is critical — always flag
+    # Special: Log4j always flag
     if "log4j" in text or "log4shell" in text or "cve-2021-44228" in (advisory.get("cve") or "").lower():
         matched_vendors.add("apache")
         matched_tier = "app"
         is_eol = True
-        eol_products.append("log4j 1.x")
+        if "log4j 1.x" not in eol_products:
+            eol_products.append("log4j 1.x")
 
     if not matched_vendors:
         return {"matched": False}
@@ -3640,6 +3726,92 @@ def repair_severity():
     })
 
 
+@app.route("/cnx-stack", methods=["GET"])
+def get_cnx_stack():
+    """Return the full CNX Stack asset list from Supabase (or hardcoded fallback)."""
+    if not _check_auth(): return jsonify({"error":"Unauthorised"}), 403
+    stack = _get_cnx_stack()
+    result = []
+    for vendor_key, info in sorted(stack.items()):
+        result.append({
+            "vendor_key":   vendor_key,
+            "tier":         info.get("tier","app"),
+            "products":     info.get("products",[]),
+            "eol_products": info.get("eol_products",[]),
+            "notes":        info.get("notes",""),
+        })
+    return jsonify(result)
+
+
+@app.route("/cnx-stack", methods=["POST"])
+def upsert_cnx_stack():
+    """Add or update a vendor in CNX Stack. Body: {vendor_key, tier, products, eol_products, notes}"""
+    if not _check_auth(): return jsonify({"error":"Unauthorised"}), 403
+    body = request.get_json() or {}
+    vendor_key = (body.get("vendor_key") or "").strip().lower()
+    if not vendor_key:
+        return jsonify({"error":"vendor_key required"}), 400
+    tier     = body.get("tier","app")
+    products = [p.strip() for p in (body.get("products") or []) if p.strip()]
+    eol_prod = [p.strip() for p in (body.get("eol_products") or []) if p.strip()]
+    notes    = body.get("notes","")
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return jsonify({"error":"Supabase not configured"}), 500
+    try:
+        r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/cnx_stack_assets",
+            headers={**supa_headers(), "Prefer":"resolution=merge-duplicates"},
+            json=[{"vendor_key":vendor_key,"tier":tier,"products":products,
+                   "eol_products":eol_prod,"notes":notes,"updated_at":"now()"}],
+            timeout=10)
+        if r.status_code in (200,201):
+            # Invalidate in-memory cache
+            global _CNX_STACK_LOADED
+            _CNX_STACK_LOADED = False
+            log.info(f"[CNX-STACK] ✅ Upserted vendor: {vendor_key}")
+            return jsonify({"status":"ok","vendor_key":vendor_key})
+        return jsonify({"error":f"Supabase {r.status_code}: {r.text[:200]}"}), 500
+    except Exception as e:
+        return jsonify({"error":str(e)}), 500
+
+
+@app.route("/cnx-stack/<vendor_key>", methods=["DELETE"])
+def delete_cnx_stack(vendor_key):
+    """Remove a vendor from CNX Stack."""
+    if not _check_auth(): return jsonify({"error":"Unauthorised"}), 403
+    vendor_key = vendor_key.strip().lower()
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return jsonify({"error":"Supabase not configured"}), 500
+    try:
+        r = requests.delete(
+            f"{SUPABASE_URL}/rest/v1/cnx_stack_assets?vendor_key=eq.{vendor_key}",
+            headers=supa_headers(), timeout=10)
+        if r.status_code in (200,204):
+            global _CNX_STACK_LOADED
+            _CNX_STACK_LOADED = False
+            return jsonify({"status":"deleted","vendor_key":vendor_key})
+        return jsonify({"error":f"Supabase {r.status_code}"}), 500
+    except Exception as e:
+        return jsonify({"error":str(e)}), 500
+
+
+@app.route("/cnx-stack/seed", methods=["POST"])
+def seed_cnx_stack():
+    """Seed Supabase cnx_stack_assets from the hardcoded dict (one-time setup)."""
+    if not _check_auth(): return jsonify({"error":"Unauthorised"}), 403
+    supa_seed_cnx_stack()
+    global _CNX_STACK_LOADED
+    _CNX_STACK_LOADED = False
+    return jsonify({"status":"seeded","count":len(CNX_STACK)})
+
+
+def _check_auth():
+    provided = (request.args.get("code","") or
+                request.headers.get("X-Access-Code","") or
+                (request.get_json(silent=True) or {}).get("code",""))
+    return provided == ACCESS_CODE
+
+
 @app.route("/create-indexes", methods=["GET"])
 def create_indexes():
     """
@@ -3863,6 +4035,11 @@ scheduler.add_job(scheduled_handover,     "cron", hour=14, minute=30)   # 20:00 
 # cron-job.org is primary fetch trigger — internal disabled to prevent double alerts:
 # scheduler.add_job(_background_fetch_and_cache, "interval", minutes=30, id="background_fetch")
 scheduler.start()
+# Load CNX Stack from Supabase at startup (seeds if table doesn't exist)
+try:
+    supa_load_cnx_stack()
+except Exception as _e:
+    log.warning(f"[CNX-STACK] Startup load failed (non-fatal): {_e}")
 
 if __name__ == "__main__":
     log.info(f"✅ Proxy listening on port {PORT}")
