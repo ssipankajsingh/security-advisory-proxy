@@ -301,7 +301,7 @@ def supa_save_advisory_cache(advisories:list) -> bool:
         STRIP_FIELDS = {"description","isNew","data_quality","exploit_refs",
                         "epss_date","tags","author","kev_notes"}
         rows = []
-        for a in advisories[:10000]:
+        for a in advisories[:15000]:
             aid = a.get("id")
             if not aid: continue
             original_fetched = a.get("fetched_at") or now
@@ -400,67 +400,36 @@ def supa_save_advisory_cache(advisories:list) -> bool:
         return False
 
 def supa_load_advisory_cache() -> list:
-    """Load advisory cache with tiered date filtering to keep payload manageable.
-
-    Tier 1 — Last 30 days (all severities): always loaded — active triage window
-    Tier 2 — KEV + Zero-Day items up to 90 days: always loaded — high-value regardless of age
-    Older items: available in Advisory Archive panel only (not in main feed)
-
-    This keeps the main feed fast and focused while preserving full history in Archive.
-    """
+    """Load all rows from advisory_cache in paginated 1000-row chunks (handles 2500+ rows)."""
     if not (SUPABASE_URL and SUPABASE_KEY): return []
-
-    now_dt   = datetime.now(timezone.utc)
-    cut_30d  = (now_dt - timedelta(days=30)).isoformat()
-    cut_90d  = (now_dt - timedelta(days=90)).isoformat()
-
     all_items = []
-    seen_ids  = set()
-
-    def _load_query(url_suffix: str):
-        """Paginated load for a given filter suffix."""
-        offset = 0; chunk = 1000; items = []
-        while True:
-            try:
-                url = (f"{SUPABASE_URL}/rest/v1/advisory_cache"
-                       f"?select=data{url_suffix}"
-                       f"&order=fetched_at.desc&limit={chunk}&offset={offset}")
-                r = requests.get(url, headers=supa_headers(), timeout=15)
-                if r.status_code != 200: break
-                rows = r.json()
-                items.extend([row["data"] for row in rows if row.get("data")])
-                if len(rows) < chunk: break
-                offset += chunk
-            except Exception as e:
-                log.error(f"[SUPABASE] load page offset={offset}: {e}"); break
-        return items
-
-    # Tier 1: all non-archived items from last 30 days
-    recent = _load_query(f"&is_archived=eq.false&published=gte.{cut_30d}")
-    for item in recent:
-        iid = item.get("id","")
-        if iid and iid not in seen_ids:
-            seen_ids.add(iid); all_items.append(item)
-
-    # Tier 2: KEV and Zero-Day items from last 90 days (not already loaded)
-    # These are always relevant regardless of age
-    evergreen = _load_query(
-        f"&is_archived=eq.false&published=gte.{cut_90d}"
-        f"&or=(is_kev.eq.true,is_zero_day.eq.true)")
-    for item in evergreen:
-        iid = item.get("id","")
-        if iid and iid not in seen_ids:
-            seen_ids.add(iid); all_items.append(item)
-
-    log.info(f"[SUPABASE] Cache loaded: {len(all_items)} items "
-             f"(30d window + KEV/0day up to 90d)")
-
-    # Final dedup pass
-    deduped = []; seen2 = set()
+    offset = 0
+    chunk = 1000
+    while True:
+        try:
+            url = (f"{SUPABASE_URL}/rest/v1/advisory_cache"
+                   f"?select=data&is_archived=eq.false"
+                   f"&order=fetched_at.desc&limit={chunk}&offset={offset}")
+            r = requests.get(url, headers=supa_headers(), timeout=15)
+            if r.status_code != 200:
+                log.warning(f"[SUPABASE] load_cache page offset={offset}: HTTP {r.status_code}")
+                break
+            rows = r.json()
+            items = [row["data"] for row in rows if row.get("data")]
+            all_items.extend(items)
+            if len(rows) < chunk:
+                break  # last page
+            offset += chunk
+        except Exception as e:
+            log.error(f"[SUPABASE] load_cache page offset={offset}: {e}")
+            break
+    log.info(f"[SUPABASE] Cache loaded: {len(all_items)} items (paginated, {offset+chunk} rows scanned)")
+    # R7 fix: deduplicate on load — same CVE may exist from multiple sources
+    seen_ids = set(); deduped = []
     for item in all_items:
         iid = item.get("id","")
-        if iid and iid not in seen2:
-            seen2.add(iid); deduped.append(item)
+        if iid and iid not in seen_ids:
+            seen_ids.add(iid); deduped.append(item)
     if len(deduped) < len(all_items):
         log.info(f"[SUPABASE] Deduped on load: {len(all_items)} → {len(deduped)} items")
     return deduped
@@ -1573,6 +1542,53 @@ def normalise_entry(entry, source:str) -> dict:
     return advisory
 
 # ─── FETCH ────────────────────────────────────────────────────────────────────
+# Feeds that block cloud-hosting IPs — use RSS proxy as fallback
+# rss2json.com provides a free proxy that fetches from their IP range
+RSS_PROXY_URL = "https://api.rss2json.com/v1/api.json?rss_url={url}"
+
+# Known IP-blocked feeds — try direct first, fall back to proxy
+IP_BLOCKED_FEEDS = {
+    "checkpoint", "forescout", "juniper", "openssl", "android",
+    "sophos", "trellix", "adobe", "secureworks", "ivanti",
+}
+
+def fetch_via_proxy(key: str, url: str) -> list:
+    """Fetch RSS via rss2json proxy — for feeds that block cloud IPs."""
+    try:
+        proxy_url = RSS_PROXY_URL.format(url=requests.utils.quote(url, safe=""))
+        resp = requests.get(proxy_url, timeout=20,
+            headers={"User-Agent":"SecurityAdvisoryProxy/2.0"})
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        if data.get("status") != "ok":
+            log.debug(f"[{key}] Proxy returned status: {data.get('status')}")
+            return []
+        # Convert rss2json format to feedparser-like entries
+        items = []
+        for item in (data.get("items") or [])[:50]:
+            # Build a minimal entry object compatible with normalise_entry
+            class FakeEntry:
+                pass
+            e = FakeEntry()
+            e.title       = item.get("title","")
+            e.link        = item.get("link","")
+            e.id          = item.get("guid") or item.get("link","")
+            e.summary     = item.get("description","") or item.get("content","")
+            e.description = e.summary
+            e.published   = item.get("pubDate","")
+            e.updated     = item.get("pubDate","")
+            e.tags        = []
+            e.author      = item.get("author","")
+            normalized = normalise_entry(e, key)
+            if normalized: items.append(normalized)
+        log.info(f"[{key}] ✅ {len(items)} items via proxy")
+        return items
+    except Exception as ex:
+        log.debug(f"[{key}] Proxy fetch failed: {ex}")
+        return []
+
+
 def fetch_rss(key:str, url:str) -> list:
     if _feed_disabled.get(key,0) > time.time():
         log.debug(f"[{key}] Skipping — auto-disabled")
@@ -1610,6 +1626,16 @@ def fetch_rss(key:str, url:str) -> list:
             return items
         except Exception as e2: log.error(f"[{key}] SSL fallback: {e2}"); return []
     except Exception as e:
+        # 403 on known IP-blocked feeds — try RSS proxy fallback before giving up
+        if ("403" in str(e) or "Forbidden" in str(e)) and key in IP_BLOCKED_FEEDS:
+            log.debug(f"[{key}] 403 — trying RSS proxy fallback")
+            items = fetch_via_proxy(key, url)
+            if items:
+                with cache_lock: cache[key] = items
+                threading.Thread(target=supa_record_feed_metrics,
+                    args=(key,len(items),items,True,"proxy",0),daemon=True).start()
+                _feed_failures[key]=0; _feed_disabled.pop(key,None)
+                return items
         log.error(f"[{key}] Failed: {e}")
         threading.Thread(target=supa_record_feed_metrics,
             args=(key,0,[],False,str(e)[:200],0),daemon=True).start()
@@ -2574,7 +2600,7 @@ def feed_metrics_history():
         cutoff=(datetime.now(timezone.utc)-timedelta(days=7)).isoformat()
         r=requests.get(
             f"{SUPABASE_URL}/rest/v1/feed_metrics?select=source_id,fetched_at,item_count,success"
-            f"&fetched_at=gte.{cutoff}&order=fetched_at.desc&limit=5000",
+            f"&fetched_at=gte.{cutoff}&order=fetched_at.desc&limit=15000",
             headers=supa_headers(),timeout=10)
         if r.status_code==200: return jsonify({"metrics":r.json()})
         return jsonify({"metrics":[]})
@@ -2588,7 +2614,7 @@ def db_health():
     try:
         stats = {}
         # advisory_cache stats
-        r = requests.get(f"{SUPABASE_URL}/rest/v1/advisory_cache?select=id,published,severity,is_kev,is_zero_day&limit=10000",
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/advisory_cache?select=id,published,severity,is_kev,is_zero_day&limit=15000",
                         headers={**supa_headers(),"Prefer":"count=exact"}, timeout=10)
         if r.status_code == 200:
             rows = r.json()
@@ -2643,7 +2669,7 @@ def advisories():
                             log.error(f"[ADVISORIES] Background refresh failed: {e}")
                     threading.Thread(target=_bg_refresh, daemon=True).start()
                 return jsonify({"total":len(cached),"generated":datetime.now(timezone.utc).isoformat(),
-                    "advisories":cached[:8000],"source":"cache"})
+                    "advisories":cached[:15000],"source":"cache"})
 
         # No cache available — live fetch (first ever startup)
         log.info("[ADVISORIES] No cache found — doing live fetch")
@@ -2657,7 +2683,7 @@ def advisories():
                 log.error("[SUPABASE] ⚠️  All 3 save attempts failed — cache may be stale")
             threading.Thread(target=_save_with_retry, args=(all_adv,), daemon=True).start()
         return jsonify({"total":len(all_adv),"generated":datetime.now(timezone.utc).isoformat(),
-            "advisories":all_adv[:8000],"source":"live"})
+            "advisories":all_adv[:15000],"source":"live"})
     except Exception as e:
         log.error(f"[ADVISORIES] {e}")
         return jsonify({"error":"Failed to fetch advisories"}), 500
@@ -3668,6 +3694,50 @@ def repair_severity():
         "errors": len(errors),
         "corrections": corrected,
         "error_details": errors[:10],
+    })
+
+
+@app.route("/apply-grants", methods=["GET"])
+def apply_grants():
+    """
+    Apply explicit Postgres grants required by Supabase from Oct 30, 2026.
+    Supabase is removing implicit grants — PostgREST needs explicit GRANT on all tables.
+    Run once before Oct 30, 2026:
+      GET /apply-grants?code=CNXadvisorySEC@123
+
+    Reference: https://supabase.com/docs/guides/database/postgres/roles
+    """
+    provided = request.args.get("code","") or request.headers.get("X-Access-Code","")
+    if provided != ACCESS_CODE:
+        return jsonify({"error":"Unauthorised"}), 403
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return jsonify({"error":"Supabase not configured"}), 500
+
+    tables = [
+        "advisory_cache","acknowledgments","source_config","feed_metrics",
+        "advisory_history","sla_audit_log","saved_searches","cve_context_cache",
+        "cnx_stack_assets",
+    ]
+    results = {}
+    for table in tables:
+        sql = f"""
+        GRANT SELECT, INSERT, UPDATE, DELETE ON public.{table} TO anon, authenticated, service_role;
+        GRANT USAGE, SELECT ON SEQUENCE public.{table}_id_seq TO anon, authenticated, service_role;
+        """
+        try:
+            r = requests.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/exec_sql",
+                headers={**supa_headers(), "Content-Type":"application/json"},
+                json={"query": sql}, timeout=15)
+            results[table] = "✅ granted" if r.status_code in (200,201,204) else f"⚠️ {r.status_code}"
+        except Exception as e:
+            results[table] = f"❌ {e}"
+
+    all_ok = all("✅" in v for v in results.values())
+    return jsonify({
+        "status": "complete" if all_ok else "partial",
+        "tables": results,
+        "note": "Run this before Oct 30, 2026 to avoid PostgREST access breaking on Supabase free tier."
     })
 
 
