@@ -400,36 +400,67 @@ def supa_save_advisory_cache(advisories:list) -> bool:
         return False
 
 def supa_load_advisory_cache() -> list:
-    """Load all rows from advisory_cache in paginated 1000-row chunks (handles 2500+ rows)."""
+    """Load advisory cache with tiered date filtering to keep payload manageable.
+
+    Tier 1 — Last 30 days (all severities): always loaded — active triage window
+    Tier 2 — KEV + Zero-Day items up to 90 days: always loaded — high-value regardless of age
+    Older items: available in Advisory Archive panel only (not in main feed)
+
+    This keeps the main feed fast and focused while preserving full history in Archive.
+    """
     if not (SUPABASE_URL and SUPABASE_KEY): return []
+
+    now_dt   = datetime.now(timezone.utc)
+    cut_30d  = (now_dt - timedelta(days=30)).isoformat()
+    cut_90d  = (now_dt - timedelta(days=90)).isoformat()
+
     all_items = []
-    offset = 0
-    chunk = 1000
-    while True:
-        try:
-            url = (f"{SUPABASE_URL}/rest/v1/advisory_cache"
-                   f"?select=data&is_archived=eq.false"
-                   f"&order=fetched_at.desc&limit={chunk}&offset={offset}")
-            r = requests.get(url, headers=supa_headers(), timeout=15)
-            if r.status_code != 200:
-                log.warning(f"[SUPABASE] load_cache page offset={offset}: HTTP {r.status_code}")
-                break
-            rows = r.json()
-            items = [row["data"] for row in rows if row.get("data")]
-            all_items.extend(items)
-            if len(rows) < chunk:
-                break  # last page
-            offset += chunk
-        except Exception as e:
-            log.error(f"[SUPABASE] load_cache page offset={offset}: {e}")
-            break
-    log.info(f"[SUPABASE] Cache loaded: {len(all_items)} items (paginated, {offset+chunk} rows scanned)")
-    # R7 fix: deduplicate on load — same CVE may exist from multiple sources
-    seen_ids = set(); deduped = []
-    for item in all_items:
+    seen_ids  = set()
+
+    def _load_query(url_suffix: str):
+        """Paginated load for a given filter suffix."""
+        offset = 0; chunk = 1000; items = []
+        while True:
+            try:
+                url = (f"{SUPABASE_URL}/rest/v1/advisory_cache"
+                       f"?select=data{url_suffix}"
+                       f"&order=fetched_at.desc&limit={chunk}&offset={offset}")
+                r = requests.get(url, headers=supa_headers(), timeout=15)
+                if r.status_code != 200: break
+                rows = r.json()
+                items.extend([row["data"] for row in rows if row.get("data")])
+                if len(rows) < chunk: break
+                offset += chunk
+            except Exception as e:
+                log.error(f"[SUPABASE] load page offset={offset}: {e}"); break
+        return items
+
+    # Tier 1: all non-archived items from last 30 days
+    recent = _load_query(f"&is_archived=eq.false&published=gte.{cut_30d}")
+    for item in recent:
         iid = item.get("id","")
         if iid and iid not in seen_ids:
-            seen_ids.add(iid); deduped.append(item)
+            seen_ids.add(iid); all_items.append(item)
+
+    # Tier 2: KEV and Zero-Day items from last 90 days (not already loaded)
+    # These are always relevant regardless of age
+    evergreen = _load_query(
+        f"&is_archived=eq.false&published=gte.{cut_90d}"
+        f"&or=(is_kev.eq.true,is_zero_day.eq.true)")
+    for item in evergreen:
+        iid = item.get("id","")
+        if iid and iid not in seen_ids:
+            seen_ids.add(iid); all_items.append(item)
+
+    log.info(f"[SUPABASE] Cache loaded: {len(all_items)} items "
+             f"(30d window + KEV/0day up to 90d)")
+
+    # Final dedup pass
+    deduped = []; seen2 = set()
+    for item in all_items:
+        iid = item.get("id","")
+        if iid and iid not in seen2:
+            seen2.add(iid); deduped.append(item)
     if len(deduped) < len(all_items):
         log.info(f"[SUPABASE] Deduped on load: {len(all_items)} → {len(deduped)} items")
     return deduped
@@ -2612,7 +2643,7 @@ def advisories():
                             log.error(f"[ADVISORIES] Background refresh failed: {e}")
                     threading.Thread(target=_bg_refresh, daemon=True).start()
                 return jsonify({"total":len(cached),"generated":datetime.now(timezone.utc).isoformat(),
-                    "advisories":cached[:10000],"source":"cache"})
+                    "advisories":cached[:8000],"source":"cache"})
 
         # No cache available — live fetch (first ever startup)
         log.info("[ADVISORIES] No cache found — doing live fetch")
@@ -2626,7 +2657,7 @@ def advisories():
                 log.error("[SUPABASE] ⚠️  All 3 save attempts failed — cache may be stale")
             threading.Thread(target=_save_with_retry, args=(all_adv,), daemon=True).start()
         return jsonify({"total":len(all_adv),"generated":datetime.now(timezone.utc).isoformat(),
-            "advisories":all_adv[:10000],"source":"live"})
+            "advisories":all_adv[:8000],"source":"live"})
     except Exception as e:
         log.error(f"[ADVISORIES] {e}")
         return jsonify({"error":"Failed to fetch advisories"}), 500
