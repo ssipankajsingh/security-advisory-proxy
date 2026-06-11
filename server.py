@@ -301,7 +301,7 @@ def supa_save_advisory_cache(advisories:list) -> bool:
         STRIP_FIELDS = {"description","isNew","data_quality","exploit_refs",
                         "epss_date","tags","author","kev_notes"}
         rows = []
-        for a in advisories[:5000]:
+        for a in advisories[:10000]:
             aid = a.get("id")
             if not aid: continue
             original_fetched = a.get("fetched_at") or now
@@ -656,117 +656,29 @@ CNX_STACK = {
     },
 }
 
+# Flat lookup: normalised keyword → (vendor_key, tier, eol_list)
+# Built once at startup for O(1) matching during advisory processing
+_CNX_VENDOR_KEYWORDS: dict = {}
+_CNX_PRODUCT_KEYWORDS: list = []  # list of (keyword_lower, vendor_key, is_eol)
 
-# ── CNX Stack Supabase persistence ───────────────────────────────────────────
-# cnx_stack_assets table schema:
-#   id: bigint (auto)
-#   vendor_key: text (unique, e.g. "cisco")
-#   tier: text ("network"|"server"|"endpoint"|"app")
-#   products: text[] (list of product keywords)
-#   eol_products: text[] (subset of products that are EOL)
-#   notes: text (optional context)
-#   updated_at: timestamptz
-
-_CNX_STACK_CACHE: dict = {}   # in-memory cache loaded from Supabase
-_CNX_STACK_LOADED = False
-
-def supa_load_cnx_stack() -> dict:
-    """Load CNX Stack asset list from Supabase. Falls back to hardcoded CNX_STACK."""
-    global _CNX_STACK_CACHE, _CNX_STACK_LOADED
-    if _CNX_STACK_LOADED:  # already attempted — don't retry on every call
-        return _CNX_STACK_CACHE if _CNX_STACK_CACHE else CNX_STACK
-    if not (SUPABASE_URL and SUPABASE_KEY):
-        _CNX_STACK_LOADED = True
-        _CNX_STACK_CACHE = CNX_STACK
-        return CNX_STACK
-    try:
-        r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/cnx_stack_assets?select=*&limit=200",
-            headers=supa_headers(), timeout=10)
-        if r.status_code == 200:
-            rows = r.json()
-            if rows:
-                loaded = {}
-                for row in rows:
-                    vk = row.get("vendor_key","").strip().lower()
-                    if not vk: continue
-                    loaded[vk] = {
-                        "tier":         row.get("tier","app"),
-                        "products":     row.get("products") or [],
-                        "eol_products": row.get("eol_products") or [],
-                        "notes":        row.get("notes",""),
-                    }
-                _CNX_STACK_CACHE = loaded
-                _CNX_STACK_LOADED = True
-                log.info(f"[CNX-STACK] Loaded {len(loaded)} vendors from Supabase")
-                return loaded
-            else:
-                # Table exists but empty — seed it
-                log.info("[CNX-STACK] Table empty — seeding from hardcoded dict")
-                _CNX_STACK_LOADED = True  # set BEFORE seed to prevent loop
-                _CNX_STACK_CACHE = CNX_STACK
-                supa_seed_cnx_stack()
-        elif r.status_code in (404, 400, 406):
-            # Table doesn't exist yet — use hardcoded, stop retrying
-            log.warning("[CNX-STACK] Table not found — using hardcoded dict. "
-                        "Create table in Supabase dashboard: "
-                        "https://supabase.com/dashboard/project/cueubarivumvwftoyzdy/sql")
-            _CNX_STACK_LOADED = True  # prevent retry spam
-            _CNX_STACK_CACHE = CNX_STACK
-        else:
-            log.warning(f"[CNX-STACK] Load returned {r.status_code} — using hardcoded dict")
-            _CNX_STACK_LOADED = True
-            _CNX_STACK_CACHE = CNX_STACK
-    except Exception as e:
-        log.warning(f"[CNX-STACK] Load failed: {e} — using hardcoded dict")
-        _CNX_STACK_LOADED = True
-        _CNX_STACK_CACHE = CNX_STACK
-    return _CNX_STACK_CACHE or CNX_STACK
-
-def supa_seed_cnx_stack():
-    """Seed cnx_stack_assets table from the hardcoded CNX_STACK dict.
-    Table must already exist — create it manually in Supabase SQL editor first.
-    SQL: see /cnx-stack/sql endpoint for the CREATE TABLE statement.
-    """
-    if not (SUPABASE_URL and SUPABASE_KEY): return
-    try:
-        rows = []
-        for vendor_key, info in CNX_STACK.items():
-            rows.append({
-                "vendor_key":   vendor_key,
-                "tier":         info.get("tier","app"),
-                "products":     info.get("products",[]),
-                "eol_products": info.get("eol_products",[]),
-                "notes":        "",
-            })
-        r = requests.post(
-            f"{SUPABASE_URL}/rest/v1/cnx_stack_assets",
-            headers={**supa_headers(), "Prefer":"resolution=merge-duplicates"},
-            json=rows, timeout=20)
-        if r.status_code in (200, 201):
-            log.info(f"[CNX-STACK] ✅ Seeded {len(rows)} vendors to Supabase")
-            global _CNX_STACK_LOADED, _CNX_STACK_CACHE
-            _CNX_STACK_CACHE = {v["vendor_key"]:{"tier":v["tier"],"products":v["products"],"eol_products":v["eol_products"],"notes":""} for v in rows}
-            _CNX_STACK_LOADED = True
-        else:
-            log.warning(f"[CNX-STACK] Seed returned {r.status_code}: {r.text[:200]}")
-    except Exception as e:
-        log.error(f"[CNX-STACK] Seed failed: {e}")
-
-def _get_cnx_stack() -> dict:
-    """Get CNX Stack — Supabase if loaded, else hardcoded fallback."""
-    if _CNX_STACK_LOADED and _CNX_STACK_CACHE:
-        return _CNX_STACK_CACHE
-    return supa_load_cnx_stack()
+def _build_cnx_lookup():
+    for vendor_key, info in CNX_STACK.items():
+        # Vendor name itself
+        _CNX_VENDOR_KEYWORDS[vendor_key.lower()] = vendor_key
+        for prod in info["products"]:
+            is_eol = prod in info.get("eol_products", [])
+            _CNX_PRODUCT_KEYWORDS.append((prod.lower(), vendor_key, is_eol))
+        for prod in info.get("eol_products", []):
+            _CNX_PRODUCT_KEYWORDS.append((prod.lower(), vendor_key, True))
+_build_cnx_lookup()
 
 
 def match_cnx_stack(advisory: dict) -> dict:
     """
     Check if an advisory affects Concentrix's asset inventory.
     Returns dict: {matched: bool, vendors: list, tier: str, eol: bool, eol_products: list}
-    Uses Supabase cnx_stack_assets (with hardcoded fallback).
+    Matches against: advisory vendor, title, summary, affected_products
     """
-    stack = _get_cnx_stack()
     text = " ".join([
         (advisory.get("vendor") or ""),
         (advisory.get("title") or ""),
@@ -780,35 +692,28 @@ def match_cnx_stack(advisory: dict) -> dict:
     is_eol = False
     eol_products = []
 
-    for vendor_key, info in stack.items():
-        vk_lower = vendor_key.lower()
-        # Vendor-level match
-        if vk_lower in text:
+    # Check vendor-level match first (fast)
+    adv_vendor = (advisory.get("vendor") or "").lower()
+    for keyword, vendor_key in _CNX_VENDOR_KEYWORDS.items():
+        if keyword in adv_vendor or keyword in text:
             matched_vendors.add(vendor_key)
-            matched_tier = info.get("tier", "app")
-        # Product-level match
-        for prod in (info.get("products") or []):
-            if prod.lower() in text:
-                matched_vendors.add(vendor_key)
-                matched_tier = info.get("tier", "app")
-                if prod in (info.get("eol_products") or []):
-                    is_eol = True
-                    eol_products.append(prod)
-        # EOL-specific match
-        for prod in (info.get("eol_products") or []):
-            if prod.lower() in text:
-                matched_vendors.add(vendor_key)
-                matched_tier = info.get("tier", "app")
-                is_eol = True
-                eol_products.append(prod)
+            matched_tier = CNX_STACK[vendor_key]["tier"]
 
-    # Special: Log4j always flag
+    # Check product-level match (more precise)
+    for prod_kw, vendor_key, prod_eol in _CNX_PRODUCT_KEYWORDS:
+        if prod_kw in text:
+            matched_vendors.add(vendor_key)
+            matched_tier = CNX_STACK[vendor_key]["tier"]
+            if prod_eol:
+                is_eol = True
+                eol_products.append(prod_kw)
+
+    # Special: Log4j is critical — always flag
     if "log4j" in text or "log4shell" in text or "cve-2021-44228" in (advisory.get("cve") or "").lower():
         matched_vendors.add("apache")
         matched_tier = "app"
         is_eol = True
-        if "log4j 1.x" not in eol_products:
-            eol_products.append("log4j 1.x")
+        eol_products.append("log4j 1.x")
 
     if not matched_vendors:
         return {"matched": False}
@@ -902,7 +807,7 @@ TRUSTED_FEEDS = {
     "atlassian": "https://confluence.atlassian.com/security/rss.xml",                    # Atlassian Security Advisories
     "gitlab":    "https://about.gitlab.com/security/feed.xml",                           # GitLab Security Releases
     "solarwinds":"https://www.solarwinds.com/shared-content/rss-feed/solarwinds-cve-rss-feed.xml",
-    "forescout": "https://www.forescout.com/company/resources/feed/",
+    "forescout": "https://www.forescout.com/resources/feed/?type=advisory",
 
     # ══ ICS / OT (NEW) ═══════════════════════════════════════════════════════
     "siemens_ics":      "https://cert-portal.siemens.com/productcert/rss/advisories.atom",  # Siemens ProductCERT
@@ -1588,25 +1493,6 @@ def normalise_entry(entry, source:str) -> dict:
             is_oem = False  # strip OEM flag from blog posts
     cvss_score   = extract_cvss_v3(combined)
     severity_raw = parse_severity(combined, source=source, is_oem=is_oem)
-
-    # MSRC/vendor feeds include a <threat:Severity> or <vuln:Severity> XML field
-    # feedparser exposes these as entry.threat_severity, entry.vuln_severity etc.
-    # We read it but only trust it when CVSS confirms — otherwise it inflates severity.
-    # e.g. MSRC marks CVSS 3.7 as "Critical" in their portal (their own risk rating, not NVD)
-    vendor_sev_field = (
-        getattr(entry, "threat_severity", None) or
-        getattr(entry, "vuln_severity", None) or
-        getattr(entry, "dc_subject", None) or ""
-    ).strip().capitalize()
-    if vendor_sev_field in ("Critical","High","Medium","Low") and not cvss_score:
-        # No CVSS in feed — vendor severity label is our only signal.
-        # Cap OEM vendor self-reported severity at High (not Critical) unless NVD confirms.
-        # NVD enrichment will correct it later if it's genuinely Critical (CVSS >= 9)
-        if is_oem and vendor_sev_field == "Critical":
-            severity_raw = "High"   # conservative — NVD will promote to Critical if warranted
-        elif severity_raw == "Unknown":
-            severity_raw = vendor_sev_field
-
     # NEWS items capped at Medium — keyword matches on news titles inflate severity
     severity = min(["Critical","High","Medium","Low","Unknown"].index(severity_raw),
                    ["Critical","High","Medium","Low","Unknown"].index("Medium") if is_news else 0)
@@ -1771,7 +1657,7 @@ def enrich_missing_cvss_from_nvd(advisories:list)->list:
         # KEV items hardcoded Critical with no CVSS — enrich to get real score
         if a.get("isKev") and not a.get("cvss"): return True
         return False
-    needs=[a for a in advisories if _needs_nvd(a)][:50]
+    needs=[a for a in advisories if _needs_nvd(a)][:30]
     if not needs: return advisories
     log.info(f"[NVD-ENRICH] Querying {len(needs)} CVEs missing CVSS/severity")
     adv_map={a["cve"]:a for a in advisories if a.get("cve")}
@@ -2671,7 +2557,7 @@ def db_health():
     try:
         stats = {}
         # advisory_cache stats
-        r = requests.get(f"{SUPABASE_URL}/rest/v1/advisory_cache?select=id,published,severity,is_kev,is_zero_day&limit=5000",
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/advisory_cache?select=id,published,severity,is_kev,is_zero_day&limit=10000",
                         headers={**supa_headers(),"Prefer":"count=exact"}, timeout=10)
         if r.status_code == 200:
             rows = r.json()
@@ -2726,7 +2612,7 @@ def advisories():
                             log.error(f"[ADVISORIES] Background refresh failed: {e}")
                     threading.Thread(target=_bg_refresh, daemon=True).start()
                 return jsonify({"total":len(cached),"generated":datetime.now(timezone.utc).isoformat(),
-                    "advisories":cached[:5000],"source":"cache"})
+                    "advisories":cached[:10000],"source":"cache"})
 
         # No cache available — live fetch (first ever startup)
         log.info("[ADVISORIES] No cache found — doing live fetch")
@@ -2740,7 +2626,7 @@ def advisories():
                 log.error("[SUPABASE] ⚠️  All 3 save attempts failed — cache may be stale")
             threading.Thread(target=_save_with_retry, args=(all_adv,), daemon=True).start()
         return jsonify({"total":len(all_adv),"generated":datetime.now(timezone.utc).isoformat(),
-            "advisories":all_adv[:5000],"source":"live"})
+            "advisories":all_adv[:10000],"source":"live"})
     except Exception as e:
         log.error(f"[ADVISORIES] {e}")
         return jsonify({"error":"Failed to fetch advisories"}), 500
@@ -3606,69 +3492,6 @@ def scheduled_patch_tuesday():
 # ─── FETCH-NOW ENDPOINT (for cron-job.org external trigger) ──────────────────
 _fetch_in_progress = threading.Event()
 
-def _mini_severity_repair(max_items:int=20):
-    """Quick severity correction pass — runs after each fetch cycle.
-    Only targets very recent items (last 24h) to catch newly ingested mis-classified items.
-    Nightly job handles older items.
-    """
-    if not (SUPABASE_URL and SUPABASE_KEY): return
-    import time as _t
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-    try:
-        r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/advisory_cache"
-            f"?select=id,cve_id,cvss,data&severity=eq.Critical"
-            f"&published=gte.{cutoff}&limit={max_items}",
-            headers=supa_headers(), timeout=10)
-        rows = r.json() if r.status_code == 200 else []
-    except Exception: return
-
-    SEV_MAP = {(9.0,10.1):"Critical",(7.0,9.0):"High",(4.0,7.0):"Medium",(0.1,4.0):"Low"}
-    corrected = 0
-    for row in rows:
-        try:
-            cvss = float(row.get("cvss") or 0)
-        except: cvss = 0
-        cve_id = (row.get("cve_id") or "").strip()
-        data = row.get("data") or {}
-        if not (0 < cvss < 7.0 and cve_id.startswith("CVE-") and not data.get("_nvd_queried")):
-            continue
-        try:
-            resp = requests.get("https://services.nvd.nist.gov/rest/json/cves/2.0",
-                params={"cveId":cve_id}, timeout=10,
-                headers={"User-Agent":"SecurityAdvisoryProxy/2.0"})
-            if resp.status_code != 200: _t.sleep(0.7); continue
-            vulns = resp.json().get("vulnerabilities",[])
-            if not vulns: _t.sleep(0.7); continue
-            nvd_cvss = None; nvd_sev = None
-            for mk in ("cvssMetricV31","cvssMetricV30"):
-                for m in vulns[0].get("cve",{}).get("metrics",{}).get(mk,[]):
-                    if m.get("type") in ("Primary","Secondary"):
-                        nvd_cvss = m.get("cvssData",{}).get("baseScore")
-                        nvd_sev = m.get("cvssData",{}).get("baseSeverity","").capitalize()
-                        break
-                if nvd_cvss: break
-            if not nvd_cvss: _t.sleep(0.7); continue
-            correct_sev = nvd_sev or next((s for (lo,hi),s in SEV_MAP.items() if lo<=nvd_cvss<hi), None)
-            data["_nvd_queried"] = True
-            if correct_sev and correct_sev != "Critical":
-                data["severity"] = correct_sev
-                data["severity_corrected_by_nvd"] = True
-                requests.patch(
-                    f"{SUPABASE_URL}/rest/v1/advisory_cache?id=eq.{row['id']}",
-                    headers={**supa_headers(),"Prefer":"return=minimal"},
-                    json={"severity":correct_sev,"data":data}, timeout=8)
-                corrected += 1
-            else:
-                requests.patch(
-                    f"{SUPABASE_URL}/rest/v1/advisory_cache?id=eq.{row['id']}",
-                    headers={**supa_headers(),"Prefer":"return=minimal"},
-                    json={"data":data}, timeout=8)
-        except Exception: pass
-        _t.sleep(0.7)
-    if corrected: log.info(f"[MINI-REPAIR] ✅ Corrected {corrected} items post-fetch")
-
-
 def _background_fetch_and_cache():
     """Run a full feed fetch and save to Supabase. Called from /fetch-now."""
     if _fetch_in_progress.is_set():
@@ -3681,12 +3504,6 @@ def _background_fetch_and_cache():
         if SUPABASE_URL and advisories:
             supa_save_advisory_cache(advisories)
             log.info(f"[FETCH-NOW] ✅ Fetched {len(advisories)} advisories and saved to cache")
-            # Run a mini severity correction pass after each fetch (max 20 items)
-            # This catches new mis-classified items before next nightly repair
-            try:
-                _mini_severity_repair(max_items=20)
-            except Exception as _e:
-                log.debug(f"[FETCH-NOW] Mini repair skipped: {_e}")
         else:
             log.warning("[FETCH-NOW] No advisories fetched or Supabase not configured")
     except Exception as e:
@@ -3733,12 +3550,8 @@ def repair_severity():
         except (ValueError, TypeError):
             cvss = 0
         cve_id = (row.get("cve_id") or "").strip()
-        data = row.get("data") or {}
-        # Skip if already queried — _nvd_queried is stored in data blob
-        if data.get("_nvd_queried"):
-            continue
         if cvss > 0 and cvss < 7.0 and cve_id.startswith("CVE-"):
-            candidates.append({"id": row["id"], "cve_id": cve_id, "cvss": cvss, "data": data})
+            candidates.append({"id": row["id"], "cve_id": cve_id, "cvss": cvss, "data": row.get("data",{})})
 
     log.info(f"[REPAIR-SEV] Found {len(candidates)} Critical rows with CVSS < 7.0 to check")
 
@@ -3825,130 +3638,6 @@ def repair_severity():
         "corrections": corrected,
         "error_details": errors[:10],
     })
-
-
-@app.route("/cnx-stack/sql", methods=["GET"])
-def cnx_stack_sql():
-    """Returns the SQL to create the cnx_stack_assets table in Supabase.
-    Run this once in Supabase SQL Editor, then hit /cnx-stack/seed to populate it.
-    No auth required — SQL is not sensitive.
-    """
-    sql = """-- Run this in Supabase SQL Editor:
--- https://supabase.com/dashboard/project/cueubarivumvwftoyzdy/sql
-
-CREATE TABLE IF NOT EXISTS public.cnx_stack_assets (
-    id          bigserial PRIMARY KEY,
-    vendor_key  text UNIQUE NOT NULL,
-    tier        text NOT NULL DEFAULT 'app'
-                    CHECK (tier IN ('network','server','endpoint','app')),
-    products    text[] NOT NULL DEFAULT '{}',
-    eol_products text[] NOT NULL DEFAULT '{}',
-    notes       text DEFAULT '',
-    updated_at  timestamptz DEFAULT now()
-);
-
--- Enable Row Level Security
-ALTER TABLE public.cnx_stack_assets ENABLE ROW LEVEL SECURITY;
-
--- Allow all operations (proxy uses service key)
-CREATE POLICY "allow_all" ON public.cnx_stack_assets
-    FOR ALL USING (true) WITH CHECK (true);
-
--- Index for fast vendor lookup
-CREATE INDEX IF NOT EXISTS idx_cnx_stack_vendor ON public.cnx_stack_assets(vendor_key);
-
--- After running the above, seed the table:
--- POST https://security-advisory-proxy.onrender.com/cnx-stack/seed?code=CNXadvisorySEC@123
-"""
-    return sql, 200, {"Content-Type": "text/plain"}
-
-
-@app.route("/cnx-stack", methods=["GET"])
-def get_cnx_stack():
-    """Return the full CNX Stack asset list from Supabase (or hardcoded fallback)."""
-    if not _check_auth(): return jsonify({"error":"Unauthorised"}), 403
-    stack = _get_cnx_stack()
-    result = []
-    for vendor_key, info in sorted(stack.items()):
-        result.append({
-            "vendor_key":   vendor_key,
-            "tier":         info.get("tier","app"),
-            "products":     info.get("products",[]),
-            "eol_products": info.get("eol_products",[]),
-            "notes":        info.get("notes",""),
-        })
-    return jsonify(result)
-
-
-@app.route("/cnx-stack", methods=["POST"])
-def upsert_cnx_stack():
-    """Add or update a vendor in CNX Stack. Body: {vendor_key, tier, products, eol_products, notes}"""
-    if not _check_auth(): return jsonify({"error":"Unauthorised"}), 403
-    body = request.get_json() or {}
-    vendor_key = (body.get("vendor_key") or "").strip().lower()
-    if not vendor_key:
-        return jsonify({"error":"vendor_key required"}), 400
-    tier     = body.get("tier","app")
-    products = [p.strip() for p in (body.get("products") or []) if p.strip()]
-    eol_prod = [p.strip() for p in (body.get("eol_products") or []) if p.strip()]
-    notes    = body.get("notes","")
-    if not (SUPABASE_URL and SUPABASE_KEY):
-        return jsonify({"error":"Supabase not configured"}), 500
-    try:
-        r = requests.post(
-            f"{SUPABASE_URL}/rest/v1/cnx_stack_assets",
-            headers={**supa_headers(), "Prefer":"resolution=merge-duplicates"},
-            json=[{"vendor_key":vendor_key,"tier":tier,"products":products,
-                   "eol_products":eol_prod,"notes":notes,"updated_at":"now()"}],
-            timeout=10)
-        if r.status_code in (200,201):
-            # Invalidate in-memory cache
-            global _CNX_STACK_LOADED
-            _CNX_STACK_LOADED = False
-            log.info(f"[CNX-STACK] ✅ Upserted vendor: {vendor_key}")
-            return jsonify({"status":"ok","vendor_key":vendor_key})
-        return jsonify({"error":f"Supabase {r.status_code}: {r.text[:200]}"}), 500
-    except Exception as e:
-        return jsonify({"error":str(e)}), 500
-
-
-@app.route("/cnx-stack/<vendor_key>", methods=["DELETE"])
-def delete_cnx_stack(vendor_key):
-    """Remove a vendor from CNX Stack."""
-    if not _check_auth(): return jsonify({"error":"Unauthorised"}), 403
-    vendor_key = vendor_key.strip().lower()
-    if not (SUPABASE_URL and SUPABASE_KEY):
-        return jsonify({"error":"Supabase not configured"}), 500
-    try:
-        r = requests.delete(
-            f"{SUPABASE_URL}/rest/v1/cnx_stack_assets?vendor_key=eq.{vendor_key}",
-            headers=supa_headers(), timeout=10)
-        if r.status_code in (200,204):
-            global _CNX_STACK_LOADED
-            _CNX_STACK_LOADED = False
-            return jsonify({"status":"deleted","vendor_key":vendor_key})
-        return jsonify({"error":f"Supabase {r.status_code}"}), 500
-    except Exception as e:
-        return jsonify({"error":str(e)}), 500
-
-
-@app.route("/cnx-stack/seed", methods=["GET","POST"])
-def seed_cnx_stack():
-    """Seed Supabase cnx_stack_assets from the hardcoded dict (one-time setup).
-    Works via browser GET: /cnx-stack/seed?code=CNXadvisorySEC@123
-    """
-    if not _check_auth(): return jsonify({"error":"Unauthorised"}), 403
-    supa_seed_cnx_stack()
-    global _CNX_STACK_LOADED
-    _CNX_STACK_LOADED = False
-    return jsonify({"status":"seeded","count":len(CNX_STACK)})
-
-
-def _check_auth():
-    provided = (request.args.get("code","") or
-                request.headers.get("X-Access-Code","") or
-                (request.get_json(silent=True) or {}).get("code",""))
-    return provided == ACCESS_CODE
 
 
 @app.route("/create-indexes", methods=["GET"])
@@ -4174,11 +3863,6 @@ scheduler.add_job(scheduled_handover,     "cron", hour=14, minute=30)   # 20:00 
 # cron-job.org is primary fetch trigger — internal disabled to prevent double alerts:
 # scheduler.add_job(_background_fetch_and_cache, "interval", minutes=30, id="background_fetch")
 scheduler.start()
-# Load CNX Stack from Supabase at startup (seeds if table doesn't exist)
-try:
-    supa_load_cnx_stack()
-except Exception as _e:
-    log.warning(f"[CNX-STACK] Startup load failed (non-fatal): {_e}")
 
 if __name__ == "__main__":
     log.info(f"✅ Proxy listening on port {PORT}")
