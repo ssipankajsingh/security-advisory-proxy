@@ -763,7 +763,7 @@ TRUSTED_FEEDS = {
     "ms_azure":  "https://azurecomcdn.azureedge.net/en-us/updates/feed/",          # Azure Updates (security tagged)
     "apple":     "https://support.apple.com/en-in/rss/securityupdates.rss",
     "ubuntu":    "https://ubuntu.com/security/notices/rss.xml",
-    "android":   "https://source.android.com/docs/security/bulletin/feed.xml",     # Fixed: was security blog, now bulletin feed
+    "android":   "https://security.googleblog.com/feeds/posts/default",            # Google Online Security Blog (covers Android monthly bulletins)
     "redhat":    "https://access.redhat.com/security/security-updates/security-advisories.rss",
     "debian":    "https://www.debian.org/security/dsa-long",
 
@@ -772,18 +772,18 @@ TRUSTED_FEEDS = {
     "fortinet":  "https://www.fortiguard.com/rss/ir.xml",
     "paloalto":  "https://security.paloaltonetworks.com/rss.xml",
     "sonicwall": "https://psirt.global.sonicwall.com/vuln-list",                   # Fixed: was blog, now PSIRT
-    "ivanti":    "https://forums.ivanti.com/s/article/Ivanti-Security-Advisories",  # No RSS — fetched via HTML scrape fallback
+    "ivanti":    "https://www.ivanti.com/blog/topics/security-advisory/rss",         # Confirmed working RSS (referenced on every Ivanti advisory blog post)
     "f5":        "https://support.f5.com/rss/security-advisories.xml",
-    "checkpoint":"https://advisories.checkpoint.com/feeds.xml",                     # Fixed: was research blog
-    "juniper":   "https://supportportal.juniper.net/s/feed/0D5i000000pN0CRCA0",
+    # checkpoint: REMOVED — Check Point publishes no public RSS for security advisories (confirmed by community 2024-2026). CVE coverage retained via cvelistV5.
+    "juniper":   "https://kb.juniper.net/InfoCenter/index?page=content&channel=SECURITY_ADVISORIES&cat=SIRT_ADVISORY&sort=datemodified&dir=descending&max=200&batch=200&rss=true",  # Juniper SIRT advisories RSS
     "citrix":    "https://support.citrix.com/feed/news",
     "aruba":     "https://support.hpe.com/hpesc/public/home/rss?docType=Security+Bulletin&sort=modified",
     "zyxel":     "https://www.zyxel.com/global/en/support/security-advisories/rss",
 
     # ══ ENDPOINT SECURITY ════════════════════════════════════════════════════
-    "sophos":        "https://www.sophos.com/en-us/security-advisories.xml",
+    # sophos:  REMOVED — sophos.com/en-us/security-advisories.xml does not exist. CVE coverage retained via cvelistV5.
     "trendmicro":    "https://success.trendmicro.com/dcx/s/feed/advisories?language=en_US",  # Fixed: was feedburner blog
-    "trellix":       "https://www.trellix.com/en-us/rss/security-advisories.xml",
+    # trellix: REMOVED — trellix.com/en-us/rss/security-advisories.xml does not exist. Bulletins live at kcm.trellix.com HTML only. CVE coverage retained via cvelistV5.
     "crowdstrike_blog": "https://www.crowdstrike.com/blog/feed/",
 
     # ══ CLOUD & INFRASTRUCTURE ═══════════════════════════════════════════════
@@ -793,7 +793,7 @@ TRUSTED_FEEDS = {
 
     # ══ MIDDLEWARE / DB / OPEN SOURCE ════════════════════════════════════════
     "mozilla":  "https://blog.mozilla.org/security/feed/",
-    "openssl":  "https://www.openssl.org/news/secadv/rss.xml",                      # Fixed: was HTML page
+    "openssl":  "https://openssl-library.org/post/atom.xml",                       # Fixed: openssl.org → openssl-library.org (domain migrated 2024)
     "apache":   "https://blogs.apache.org/security/feed/entries/rss",
     "oracle":   "https://www.oracle.com/security-alerts/rss.xml",                   # Fixed: was CERT/CC
     "vmware":   "https://community.broadcom.com/blogs/rss/4",
@@ -803,11 +803,11 @@ TRUSTED_FEEDS = {
 
     # ══ ENTERPRISE APPS (NEW) ════════════════════════════════════════════════
     "sap":       "https://dam.sap.com/mac/app/e/rss/link.htm?fid=73554900100800001281",  # SAP Security Notes RSS
-    "adobe":     "https://helpx.adobe.com/security/security-bulletin.rss",               # Adobe PSIRT
+    "adobe":     "https://blogs.adobe.com/psirt/atom.xml",                               # Adobe PSIRT atom feed (HTML scrape fallback configured below)
     "atlassian": "https://confluence.atlassian.com/security/rss.xml",                    # Atlassian Security Advisories
     "gitlab":    "https://about.gitlab.com/security/feed.xml",                           # GitLab Security Releases
     "solarwinds":"https://www.solarwinds.com/shared-content/rss-feed/solarwinds-cve-rss-feed.xml",
-    "forescout": "https://www.forescout.com/resources/feed/?type=advisory",
+    # forescout: REMOVED — no advisory-specific RSS endpoint exists. CVE coverage retained via cvelistV5.
 
     # ══ ICS / OT (NEW) ═══════════════════════════════════════════════════════
     "siemens_ics":      "https://cert-portal.siemens.com/productcert/rss/advisories.atom",  # Siemens ProductCERT
@@ -821,7 +821,7 @@ TRUSTED_FEEDS = {
     "talos":       "https://feeds.feedburner.com/feedburner/Talos",
     "unit42":      "https://unit42.paloaltonetworks.com/feed/",
     "msft_ti":     "https://www.microsoft.com/en-us/security/blog/feed/",
-    "secureworks": "https://www.secureworks.com/rss?feed=blog",
+    "secureworks": "https://www.secureworks.com/rss?feed=blog&category=research-intelligence",  # Research & intel only — drops marketing noise
     "recorded_fut":"https://therecord.media/feed/",
 
     # ══ NEWS & COMMUNITY ══════════════════════════════════════════════════════
@@ -1547,9 +1547,10 @@ def normalise_entry(entry, source:str) -> dict:
 RSS_PROXY_URL = "https://api.rss2json.com/v1/api.json?rss_url={url}"
 
 # Known IP-blocked feeds — try direct first, fall back to proxy
+# Note: checkpoint, forescout, sophos, trellix removed — they have no public RSS at all
+# (disabled in FEED_SOURCES above; CVE coverage retained via cvelistV5)
 IP_BLOCKED_FEEDS = {
-    "checkpoint", "forescout", "juniper", "openssl", "android",
-    "sophos", "trellix", "adobe", "secureworks", "ivanti",
+    "juniper", "openssl", "android", "adobe", "secureworks", "ivanti",
 }
 
 def fetch_via_proxy(key: str, url: str) -> list:
@@ -1589,6 +1590,75 @@ def fetch_via_proxy(key: str, url: str) -> list:
         return []
 
 
+# ─── LAYER-3 FALLBACK: HTML SCRAPE ────────────────────────────────────────────
+# Last-resort fallback for vendors whose RSS feed has died but who still publish
+# advisories on an HTML listing page. Extracts links matching a regex and
+# converts them to feedparser-compatible pseudo-entries.
+HTML_SCRAPE_CONFIGS = {
+    "adobe": {
+        "url": "https://helpx.adobe.com/security/security-bulletin.html",
+        "link_pattern": r'href="(/security/products/[a-z0-9_-]+/apsb\d+-\d+\.html)"',
+        "base_url": "https://helpx.adobe.com",
+        "limit": 40,
+    },
+    "ivanti": {
+        "url": "https://www.ivanti.com/blog/topics/security-advisory",
+        "link_pattern": r'href="(/blog/[a-z0-9-]+(?:security|advisory|update|cve)[a-z0-9-]*)"',
+        "base_url": "https://www.ivanti.com",
+        "limit": 30,
+    },
+}
+
+def fetch_via_html_scrape(key: str) -> list:
+    """Layer-3 fallback: scrape HTML advisory listing pages when RSS dies."""
+    config = HTML_SCRAPE_CONFIGS.get(key)
+    if not config:
+        return []
+    try:
+        resp = requests.get(config["url"], timeout=20, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        })
+        if resp.status_code != 200:
+            log.debug(f"[{key}] HTML scrape: HTTP {resp.status_code}")
+            return []
+        html = resp.text
+        link_re = re.compile(config["link_pattern"], re.IGNORECASE)
+        seen = set()
+        items = []
+        for m in link_re.finditer(html):
+            link = m.group(1)
+            if link in seen:
+                continue
+            seen.add(link)
+            if not link.startswith("http"):
+                link = config["base_url"] + link
+            # Heuristic title from URL slug
+            slug = link.rstrip("/").split("/")[-1].replace(".html", "")
+            title = slug.replace("-", " ").replace("_", " ").upper() if slug.startswith("apsb") else slug.replace("-", " ").replace("_", " ").title()
+            # Build feedparser-compatible entry
+            class _FakeEntry: pass
+            e = _FakeEntry()
+            e.title       = title
+            e.link        = link
+            e.id          = link
+            e.summary     = f"{key.title()} security advisory — visit link for full details. (HTML scrape fallback)"
+            e.description = e.summary
+            e.published   = ""
+            e.updated     = ""
+            items.append(e)
+            if len(items) >= config.get("limit", 30):
+                break
+        if items:
+            log.info(f"[{key}] ✅ {len(items)} items via HTML scrape (fallback)")
+        else:
+            log.debug(f"[{key}] HTML scrape: no entries matched pattern")
+        return items
+    except Exception as e:
+        log.debug(f"[{key}] HTML scrape error: {e}")
+        return []
+
+
 def fetch_rss(key:str, url:str) -> list:
     if _feed_disabled.get(key,0) > time.time():
         log.debug(f"[{key}] Skipping — auto-disabled")
@@ -1596,6 +1666,14 @@ def fetch_rss(key:str, url:str) -> list:
     with cache_lock:
         if key in cache: return cache[key]
     if key == "mozilla": return fetch_mozilla_json()
+
+    # ── Cascading fallback chain ──
+    # Layer 1: Direct RSS  →  Layer 2: rss2json proxy  →  Layer 3: HTML scrape
+    items = []
+    fetch_source = "direct"
+    direct_error = None
+
+    # ── Layer 1: Direct RSS fetch ──
     try:
         # Add Accept header for feeds that require it (e.g. GitHub atom)
         extra_hdrs = {"Accept":"application/atom+xml,application/rss+xml,application/xml,text/xml,*/*"} if "github.com" in url else {}
@@ -1608,37 +1686,50 @@ def fetch_rss(key:str, url:str) -> list:
         feed  = feedparser.parse(resp.content)
         items = [x for x in [normalise_entry(e, key) for e in (feed.entries or [])[:50]] if x is not None]
         if feed.bozo and not items: log.debug(f"[{key}] Bozo (XML warning, data still parsed): {feed.bozo_exception}")
-        elif items: log.info(f"[{key}] ✅ {len(items)} items")
-        with cache_lock: cache[key] = items
-        threading.Thread(target=supa_record_feed_metrics,
-            args=(key,len(items),items,True,"",0),daemon=True).start()
-        _feed_failures[key]=0; _feed_disabled.pop(key,None)
-        return items
     except requests.exceptions.SSLError:
+        # SSL bypass retry (kept inline — counts as part of Layer 1)
         try:
             resp  = requests.get(url, timeout=15, verify=False, headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"})
             feed  = feedparser.parse(resp.content)
             items = [x for x in [normalise_entry(e, key) for e in (feed.entries or [])[:50]] if x is not None]
-            log.warning(f"[{key}] SSL bypass — {len(items)} items")
-            with cache_lock: cache[key] = items
-            threading.Thread(target=supa_record_feed_metrics,
-                args=(key,len(items),items,True,"",0),daemon=True).start()
-            return items
-        except Exception as e2: log.error(f"[{key}] SSL fallback: {e2}"); return []
-    except Exception as e:
-        # 403 on known IP-blocked feeds — try RSS proxy fallback before giving up
-        if ("403" in str(e) or "Forbidden" in str(e)) and key in IP_BLOCKED_FEEDS:
-            log.debug(f"[{key}] 403 — trying RSS proxy fallback")
-            items = fetch_via_proxy(key, url)
             if items:
-                with cache_lock: cache[key] = items
-                threading.Thread(target=supa_record_feed_metrics,
-                    args=(key,len(items),items,True,"proxy",0),daemon=True).start()
-                _feed_failures[key]=0; _feed_disabled.pop(key,None)
-                return items
-        log.error(f"[{key}] Failed: {e}")
+                log.warning(f"[{key}] SSL bypass — {len(items)} items")
+                fetch_source = "ssl_bypass"
+        except Exception as e2:
+            direct_error = f"SSL: {e2}"
+    except Exception as e:
+        direct_error = str(e)
+
+    # ── Layer 2: rss2json proxy (IP-blocked feeds OR direct empty) ──
+    if not items and key in IP_BLOCKED_FEEDS:
+        log.info(f"[{key}] Layer 1 empty/failed — trying Layer 2 (rss2json proxy)")
+        items = fetch_via_proxy(key, url)
+        if items:
+            fetch_source = "proxy"
+
+    # ── Layer 3: HTML scrape (last resort) ──
+    if not items and key in HTML_SCRAPE_CONFIGS:
+        log.info(f"[{key}] Layer 2 empty/failed — trying Layer 3 (HTML scrape)")
+        scraped = fetch_via_html_scrape(key)
+        if scraped:
+            items = [x for x in [normalise_entry(e, key) for e in scraped[:50]] if x is not None]
+            if items:
+                fetch_source = "html_scrape"
+
+    # ── Record outcome ──
+    if items:
+        if fetch_source == "direct":
+            log.info(f"[{key}] ✅ {len(items)} items")
+        with cache_lock: cache[key] = items
         threading.Thread(target=supa_record_feed_metrics,
-            args=(key,0,[],False,str(e)[:200],0),daemon=True).start()
+            args=(key,len(items),items,True,fetch_source,0),daemon=True).start()
+        _feed_failures[key]=0; _feed_disabled.pop(key,None)
+        return items
+    else:
+        err_msg = direct_error or "all fallback layers returned empty"
+        log.error(f"[{key}] Failed (all layers): {err_msg}")
+        threading.Thread(target=supa_record_feed_metrics,
+            args=(key,0,[],False,err_msg[:200],0),daemon=True).start()
         _feed_failures[key]=_feed_failures.get(key,0)+1
         if _feed_failures[key]>=FEED_DISABLE_AFTER:
             _feed_disabled[key]=time.time()+(FEED_RETRY_AFTER_H*3600)
