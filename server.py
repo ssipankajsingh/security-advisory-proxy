@@ -732,7 +732,7 @@ TRUSTED_FEEDS = {
 
     # ══ TIER 0: MASTER AGGREGATORS — pre-NVD sources for fast CVE response ═
     "cvefeed_high_critical": "https://cvefeed.io/rssfeed/severity/high.xml",
-    "cvedaily_critical":     "https://cvedaily.com/feed-critical.xml",   # critical only — cvedaily_all/new removed (duplication)
+    # cvedaily_critical: REMOVED — feed returned empty in production; cvefeed_high_critical covers same space.
     # PRE-NVD: these publish CVEs hours–days before NIST NVD enriches them
     "ghsa":          "__GHSA_API__",       # GitHub Advisory Database API
     "osv":           "__OSV_API__",        # Google OSV.dev API
@@ -763,8 +763,9 @@ TRUSTED_FEEDS = {
     "ms_azure":  "https://azurecomcdn.azureedge.net/en-us/updates/feed/",          # Azure Updates (security tagged)
     "apple":     "https://support.apple.com/en-in/rss/securityupdates.rss",
     "ubuntu":    "https://ubuntu.com/security/notices/rss.xml",
+    # apple: REMOVED — support.apple.com/en-in/rss/securityupdates.rss returns empty/404; Apple killed RSS in 2024, advisories live only at support.apple.com/en-us/100100 (HTML). CVE coverage retained via cvelistV5.
     "android":   "https://security.googleblog.com/feeds/posts/default",            # Google Online Security Blog (covers Android monthly bulletins)
-    "redhat":    "https://access.redhat.com/security/security-updates/security-advisories.rss",
+    "redhat":    "https://security.access.redhat.com/data/meta/v1/rhsa.rss",       # Fixed: access.redhat.com path migrated to security.access.redhat.com
     "debian":    "https://www.debian.org/security/dsa-long",
 
     # ══ NETWORK & FIREWALL ═══════════════════════════════════════════════════
@@ -778,7 +779,7 @@ TRUSTED_FEEDS = {
     "juniper":   "https://kb.juniper.net/InfoCenter/index?page=content&channel=SECURITY_ADVISORIES&cat=SIRT_ADVISORY&sort=datemodified&dir=descending&max=200&batch=200&rss=true",  # Juniper SIRT advisories RSS
     "citrix":    "https://support.citrix.com/feed/news",
     "aruba":     "https://support.hpe.com/hpesc/public/home/rss?docType=Security+Bulletin&sort=modified",
-    "zyxel":     "https://www.zyxel.com/global/en/support/security-advisories/rss",
+    # zyxel: REMOVED — RSS URL returned empty in production; CVE coverage retained via cvelistV5.
 
     # ══ ENDPOINT SECURITY ════════════════════════════════════════════════════
     # sophos:  REMOVED — sophos.com/en-us/security-advisories.xml does not exist. CVE coverage retained via cvelistV5.
@@ -795,23 +796,23 @@ TRUSTED_FEEDS = {
     "mozilla":  "https://blog.mozilla.org/security/feed/",
     "openssl":  "https://openssl-library.org/post/atom.xml",                       # Fixed: openssl.org → openssl-library.org (domain migrated 2024)
     "apache":   "https://blogs.apache.org/security/feed/entries/rss",
-    "oracle":   "https://www.oracle.com/security-alerts/rss.xml",                   # Fixed: was CERT/CC
-    "vmware":   "https://community.broadcom.com/blogs/rss/4",
+    # oracle: REMOVED — oracle.com/security-alerts/rss.xml returns 404; Oracle CPUs published as quarterly HTML pages only. CVE coverage retained via cvelistV5.
+    # vmware: REMOVED — community.broadcom.com/blogs/rss/4 returns empty post-Broadcom migration; VMSAs live as individual HTML pages, no RSS index. CVE coverage retained via cvelistV5.
     "splunk":   "https://advisory.splunk.com/feed.xml",
     "veeam":    "https://www.veeam.com/rss/security-advisories.xml",
-    "nginx":    "https://nginx.org/en/security_advisories.html",                    # HTML only — kept for link tracking
+    # nginx: REMOVED — nginx.org/en/security_advisories.html is HTML page, not RSS (was kept for link tracking). CVE coverage retained via cvelistV5.
 
     # ══ ENTERPRISE APPS (NEW) ════════════════════════════════════════════════
     "sap":       "https://dam.sap.com/mac/app/e/rss/link.htm?fid=73554900100800001281",  # SAP Security Notes RSS
     "adobe":     "https://blogs.adobe.com/psirt/atom.xml",                               # Adobe PSIRT atom feed (HTML scrape fallback configured below)
-    "atlassian": "https://confluence.atlassian.com/security/rss.xml",                    # Atlassian Security Advisories
-    "gitlab":    "https://about.gitlab.com/security/feed.xml",                           # GitLab Security Releases
+    # atlassian: REMOVED — Atlassian has confirmed no public security advisory RSS exists (community request since 2017). Bulletins live at confluence.atlassian.com/security HTML only. CVE coverage retained via cvelistV5.
+    # gitlab:    REMOVED — about.gitlab.com/security/feed.xml returns 404; GitLab removed dedicated security RSS. CVE coverage retained via cvelistV5.
     "solarwinds":"https://www.solarwinds.com/shared-content/rss-feed/solarwinds-cve-rss-feed.xml",
     # forescout: REMOVED — no advisory-specific RSS endpoint exists. CVE coverage retained via cvelistV5.
 
     # ══ ICS / OT (NEW) ═══════════════════════════════════════════════════════
     "siemens_ics":      "https://cert-portal.siemens.com/productcert/rss/advisories.atom",  # Siemens ProductCERT
-    "schneider_ics":    "https://download.schneider-electric.com/files?p_Doc_Ref=SEVD-RSS",  # Schneider Electric PSIRT
+    # schneider_ics: REMOVED — download.schneider-electric.com returns 403 to cloud IPs (Render blocked by allowlist). CVE coverage retained via cvelistV5 (vendor=schneider-electric).
 
     # ══ YOUR STACK ═══════════════════════════════════════════════════════════
     "proofpoint": "https://www.proofpoint.com/us/rss.xml",
@@ -821,7 +822,7 @@ TRUSTED_FEEDS = {
     "talos":       "https://feeds.feedburner.com/feedburner/Talos",
     "unit42":      "https://unit42.paloaltonetworks.com/feed/",
     "msft_ti":     "https://www.microsoft.com/en-us/security/blog/feed/",
-    "secureworks": "https://www.secureworks.com/rss?feed=blog&category=research-intelligence",  # Research & intel only — drops marketing noise
+    # secureworks: REMOVED — Sophos acquired Secureworks in early 2025; secureworks.com now redirects to sophos.com (read timeout). Talos/Mandiant/Unit42 cover similar threat intel space.
     "recorded_fut":"https://therecord.media/feed/",
 
     # ══ NEWS & COMMUNITY ══════════════════════════════════════════════════════
@@ -838,7 +839,7 @@ TRUSTED_FEEDS = {
     # ══ RESEARCH / BLOGS (NEWS_SOURCES classification) ═══════════════════════
     "eset":         "https://www.welivesecurity.com/en/feed/",
     "malwarebytes": "https://www.malwarebytes.com/blog/feed/",
-    "netskope":     "https://www.netskope.com/blog/feed",
+    # netskope: REMOVED — netskope.com/blog/feed returned empty in production. CVE coverage retained via cvelistV5.
     "sentinelone":  "https://www.sentinelone.com/labs/feed/",
     "project_zero": "https://googleprojectzero.blogspot.com/feeds/posts/default",
     "cloudflare":   "https://blog.cloudflare.com/tag/security/rss/",
@@ -1547,10 +1548,9 @@ def normalise_entry(entry, source:str) -> dict:
 RSS_PROXY_URL = "https://api.rss2json.com/v1/api.json?rss_url={url}"
 
 # Known IP-blocked feeds — try direct first, fall back to proxy
-# Note: checkpoint, forescout, sophos, trellix removed — they have no public RSS at all
-# (disabled in FEED_SOURCES above; CVE coverage retained via cvelistV5)
+# Note: checkpoint, forescout, sophos, trellix, secureworks removed — disabled in TRUSTED_FEEDS
 IP_BLOCKED_FEEDS = {
-    "juniper", "openssl", "android", "adobe", "secureworks", "ivanti",
+    "juniper", "openssl", "android", "adobe", "ivanti",
 }
 
 def fetch_via_proxy(key: str, url: str) -> list:
@@ -1597,7 +1597,8 @@ def fetch_via_proxy(key: str, url: str) -> list:
 HTML_SCRAPE_CONFIGS = {
     "adobe": {
         "url": "https://helpx.adobe.com/security/security-bulletin.html",
-        "link_pattern": r'href="(/security/products/[a-z0-9_-]+/apsb\d+-\d+\.html)"',
+        # Permissive pattern: matches any APSB bulletin link regardless of path depth
+        "link_pattern": r'href="(/security/products/[^"]+apsb\d+[^"]*\.html)"',
         "base_url": "https://helpx.adobe.com",
         "limit": 40,
     },
@@ -1718,16 +1719,26 @@ def fetch_rss(key:str, url:str) -> list:
 
     # ── Record outcome ──
     if items:
+        # Always log final outcome with source tag — makes Feed Health debugging accurate
         if fetch_source == "direct":
             log.info(f"[{key}] ✅ {len(items)} items")
+        else:
+            log.info(f"[{key}] ✅ {len(items)} items (recovered via {fetch_source})")
         with cache_lock: cache[key] = items
         threading.Thread(target=supa_record_feed_metrics,
             args=(key,len(items),items,True,fetch_source,0),daemon=True).start()
         _feed_failures[key]=0; _feed_disabled.pop(key,None)
         return items
     else:
-        err_msg = direct_error or "all fallback layers returned empty"
-        log.error(f"[{key}] Failed (all layers): {err_msg}")
+        # Accurate error message: name only the layers that actually ran
+        has_l2 = key in IP_BLOCKED_FEEDS
+        has_l3 = key in HTML_SCRAPE_CONFIGS
+        if has_l2 or has_l3:
+            layers_ran = "L1" + (",L2" if has_l2 else "") + (",L3" if has_l3 else "")
+            err_msg = direct_error or f"all layers ({layers_ran}) returned empty"
+        else:
+            err_msg = direct_error or "Layer 1 returned 0 items (no fallbacks configured)"
+        log.error(f"[{key}] Failed: {err_msg}")
         threading.Thread(target=supa_record_feed_metrics,
             args=(key,0,[],False,err_msg[:200],0),daemon=True).start()
         _feed_failures[key]=_feed_failures.get(key,0)+1
