@@ -212,38 +212,102 @@ def _check_kev_due_alerts():
 
 def supa_save_archived():
     """
-    Nightly archive: flag rows 90-365d as is_archived=TRUE.
-    Hard-delete rows > 365d (non-KEV) or > 730d (KEV/ZeroDay).
+    Nightly archive + purge (01:00 UTC):
+      1. Count active rows before — log for visibility
+      2. Flag rows older than ARCHIVE_AFTER_DAYS as is_archived=TRUE (use fetched_at, not published)
+      3. Hard-delete non-KEV rows older than 365d (by fetched_at)
+      4. Hard-delete KEV rows older than 730d (by fetched_at)
+      5. Safety valve: if active rows still > ACTIVE_ROW_HARD_CAP, force-archive oldest
+      6. Purge advisory_history + feed_metrics
+      7. Count active rows after — log delta
+    Fix: archive/delete uses fetched_at (when WE first saw it), NOT published
+         (CVE published dates are historical and would wrongly delete recent rows)
     """
     if not (SUPABASE_URL and SUPABASE_KEY): return
     try:
-        now_dt    = datetime.now(timezone.utc)
-        now_iso   = now_dt.isoformat()
-        arch_cut  = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).isoformat()
-        hard_cut  = (now_dt - timedelta(days=365)).isoformat()
-        kev_cut   = (now_dt - timedelta(days=730)).isoformat()
-        met_cut   = (now_dt - timedelta(days=90)).isoformat()
-        # Archive rows older than ARCHIVE_AFTER_DAYS
-        requests.patch(
-            f"{SUPABASE_URL}/rest/v1/advisory_cache?is_archived=eq.false&published=lt.{arch_cut}",
-            headers={**supa_headers(),"Prefer":"return=minimal"},
-            json={"is_archived":True,"archived_at":now_iso}, timeout=15)
-        # Hard delete expired non-KEV rows
-        requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_cache"
-                       f"?is_kev=eq.false&is_zero_day=eq.false&published=lt.{hard_cut}",
-                       headers=supa_headers(), timeout=10)
-        # Hard delete expired KEV rows
-        requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_cache?is_kev=eq.true&published=lt.{kev_cut}",
-                       headers=supa_headers(), timeout=10)
-        # Purge advisory_history > 365d
+        now_dt   = datetime.now(timezone.utc)
+        now_iso  = now_dt.isoformat()
+        arch_cut = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).isoformat()
+        hard_cut = (now_dt - timedelta(days=365)).isoformat()
+        kev_cut  = (now_dt - timedelta(days=730)).isoformat()
+        met_cut  = (now_dt - timedelta(days=90)).isoformat()
+
+        # ── Step 1: count active rows before ──────────────────────────────
+        before_r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/advisory_cache?select=id&is_archived=eq.false",
+            headers={**supa_headers(), "Prefer": "count=exact", "Range-Unit": "items", "Range": "0-0"},
+            timeout=10)
+        before_count = int(before_r.headers.get("Content-Range", "0/0").split("/")[-1] or 0)
+        log.info(f"[NIGHTLY] Active rows before purge: {before_count}")
+
+        # ── Step 2: archive rows older than ARCHIVE_AFTER_DAYS ────────────
+        # FIX: use fetched_at (when we ingested), NOT published (CVE disclosure date)
+        # Published dates are historical (e.g. CVE-2022-xxxx) and would wrongly
+        # mark recent rows as archiveable based on the original CVE date
+        arch_r = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/advisory_cache"
+            f"?is_archived=eq.false&is_kev=eq.false&is_zero_day=eq.false"
+            f"&fetched_at=lt.{arch_cut}",
+            headers={**supa_headers(), "Prefer": "return=minimal"},
+            json={"is_archived": True, "archived_at": now_iso}, timeout=20)
+        log.info(f"[NIGHTLY] Archive PATCH (non-KEV >60d): HTTP {arch_r.status_code}")
+
+        # ── Step 3: hard-delete non-KEV/non-ZeroDay rows older than 365d ──
+        del1_r = requests.delete(
+            f"{SUPABASE_URL}/rest/v1/advisory_cache"
+            f"?is_kev=eq.false&is_zero_day=eq.false&fetched_at=lt.{hard_cut}",
+            headers=supa_headers(), timeout=15)
+        log.info(f"[NIGHTLY] Hard-delete non-KEV >365d: HTTP {del1_r.status_code}")
+
+        # ── Step 4: hard-delete KEV rows older than 730d ──────────────────
+        del2_r = requests.delete(
+            f"{SUPABASE_URL}/rest/v1/advisory_cache?is_kev=eq.true&fetched_at=lt.{kev_cut}",
+            headers=supa_headers(), timeout=15)
+        log.info(f"[NIGHTLY] Hard-delete KEV >730d: HTTP {del2_r.status_code}")
+
+        # ── Step 5: safety valve — cap active rows at ACTIVE_ROW_HARD_CAP ─
+        after_r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/advisory_cache?select=id&is_archived=eq.false",
+            headers={**supa_headers(), "Prefer": "count=exact", "Range-Unit": "items", "Range": "0-0"},
+            timeout=10)
+        after_count = int(after_r.headers.get("Content-Range", "0/0").split("/")[-1] or 0)
+        if after_count > ACTIVE_ROW_HARD_CAP:
+            overflow = after_count - ACTIVE_ROW_HARD_CAP
+            log.warning(f"[NIGHTLY] Safety valve: {after_count} active rows > cap {ACTIVE_ROW_HARD_CAP} — archiving oldest {overflow}")
+            # Fetch IDs of oldest overflow rows (by fetched_at asc)
+            oldest_r = requests.get(
+                f"{SUPABASE_URL}/rest/v1/advisory_cache"
+                f"?select=id&is_archived=eq.false&is_kev=eq.false"
+                f"&order=fetched_at.asc&limit={overflow}",
+                headers=supa_headers(), timeout=15)
+            if oldest_r.status_code == 200:
+                oldest_ids = [r["id"] for r in oldest_r.json() if r.get("id")]
+                # Archive in batches of 200
+                for i in range(0, len(oldest_ids), 200):
+                    batch = oldest_ids[i:i+200]
+                    id_filter = "in.(" + ",".join(batch) + ")"
+                    requests.patch(
+                        f"{SUPABASE_URL}/rest/v1/advisory_cache?id={id_filter}",
+                        headers={**supa_headers(), "Prefer": "return=minimal"},
+                        json={"is_archived": True, "archived_at": now_iso}, timeout=20)
+                log.info(f"[NIGHTLY] Safety valve archived {len(oldest_ids)} rows")
+
+        # ── Step 6: purge auxiliary tables ────────────────────────────────
         requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_history?changed_at=lt.{hard_cut}",
-                       headers=supa_headers(), timeout=10)
-        # Purge feed_metrics > 90d
+                        headers=supa_headers(), timeout=10)
         requests.delete(f"{SUPABASE_URL}/rest/v1/feed_metrics?fetched_at=lt.{met_cut}",
-                       headers=supa_headers(), timeout=10)
+                        headers=supa_headers(), timeout=10)
+
+        # ── Step 7: log final row count ───────────────────────────────────
+        final_r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/advisory_cache?select=id&is_archived=eq.false",
+            headers={**supa_headers(), "Prefer": "count=exact", "Range-Unit": "items", "Range": "0-0"},
+            timeout=10)
+        final_count = int(final_r.headers.get("Content-Range", "0/0").split("/")[-1] or 0)
+        log.info(f"[NIGHTLY] Archive + purge complete: {before_count} → {final_count} active rows (removed {before_count - final_count})")
         _check_kev_due_alerts()
-        log.info("[NIGHTLY] Archive + purge complete")
-    except Exception as e: log.error(f"[NIGHTLY] Archive failed: {e}")
+    except Exception as e:
+        log.error(f"[NIGHTLY] Archive failed: {e}")
 
 def supa_set_ack(advisory_id:str, by:str, note:str="", status:str="In Review",
                  assigned_to:str="", ai_triage:str="", prev_status:str="",
@@ -285,13 +349,14 @@ def supa_delete_ack(advisory_id:str, by:str) -> bool:
 # Retention windows — free tier has 488MB spare, ~400B/row after compression
 # Safe to extend: 90d default uses only ~0.9MB, 180d KEV uses ~1.8MB
 CACHE_RETENTION_DAYS = {
-    "kev":      730,  # KEV — 2 years (historically significant)
+    "kev":      730,  # KEV — 2 years (historically significant, exploitation ongoing)
     "zeroday":  365,  # Zero-day — 1 year
     "critical": 365,  # Critical — 1 year
-    "high":     365,  # High — 1 year
-    "default":  365,  # All others — 1 year
+    "high":     180,  # High — 6 months
+    "default":   90,  # Medium/Low/Unknown — 90 days (was 365, caused table bloat)
 }
-ARCHIVE_AFTER_DAYS = 90  # Flag rows as archived after 90d (still queryable)
+ARCHIVE_AFTER_DAYS  = 60    # Flag rows as archived after 60d — sooner than before
+ACTIVE_ROW_HARD_CAP = 18000  # Safety valve: force-archive oldest if active rows > this
 
 def supa_save_advisory_cache(advisories:list) -> bool:
     if not (SUPABASE_URL and SUPABASE_KEY): return False
@@ -732,7 +797,7 @@ TRUSTED_FEEDS = {
 
     # ══ TIER 0: MASTER AGGREGATORS — pre-NVD sources for fast CVE response ═
     "cvefeed_high_critical": "https://cvefeed.io/rssfeed/severity/high.xml",
-    # cvedaily_critical: REMOVED — feed returned empty in production; cvefeed_high_critical covers same space.
+    "cvedaily_critical":     "https://cvedaily.com/feed-critical.xml",   # critical only — cvedaily_all/new removed (duplication)
     # PRE-NVD: these publish CVEs hours–days before NIST NVD enriches them
     "ghsa":          "__GHSA_API__",       # GitHub Advisory Database API
     "osv":           "__OSV_API__",        # Google OSV.dev API
@@ -763,9 +828,8 @@ TRUSTED_FEEDS = {
     "ms_azure":  "https://azurecomcdn.azureedge.net/en-us/updates/feed/",          # Azure Updates (security tagged)
     "apple":     "https://support.apple.com/en-in/rss/securityupdates.rss",
     "ubuntu":    "https://ubuntu.com/security/notices/rss.xml",
-    # apple: REMOVED — support.apple.com/en-in/rss/securityupdates.rss returns empty/404; Apple killed RSS in 2024, advisories live only at support.apple.com/en-us/100100 (HTML). CVE coverage retained via cvelistV5.
-    "android":   "https://security.googleblog.com/feeds/posts/default",            # Google Online Security Blog (covers Android monthly bulletins)
-    "redhat":    "https://security.access.redhat.com/data/meta/v1/rhsa.rss",       # Fixed: access.redhat.com path migrated to security.access.redhat.com
+    "android":   "https://source.android.com/docs/security/bulletin/feed.xml",     # Fixed: was security blog, now bulletin feed
+    "redhat":    "https://access.redhat.com/security/security-updates/security-advisories.rss",
     "debian":    "https://www.debian.org/security/dsa-long",
 
     # ══ NETWORK & FIREWALL ═══════════════════════════════════════════════════
@@ -773,18 +837,18 @@ TRUSTED_FEEDS = {
     "fortinet":  "https://www.fortiguard.com/rss/ir.xml",
     "paloalto":  "https://security.paloaltonetworks.com/rss.xml",
     "sonicwall": "https://psirt.global.sonicwall.com/vuln-list",                   # Fixed: was blog, now PSIRT
-    "ivanti":    "https://www.ivanti.com/blog/topics/security-advisory/rss",         # Confirmed working RSS (referenced on every Ivanti advisory blog post)
+    "ivanti":    "https://forums.ivanti.com/s/article/Ivanti-Security-Advisories",  # No RSS — fetched via HTML scrape fallback
     "f5":        "https://support.f5.com/rss/security-advisories.xml",
-    # checkpoint: REMOVED — Check Point publishes no public RSS for security advisories (confirmed by community 2024-2026). CVE coverage retained via cvelistV5.
-    "juniper":   "https://kb.juniper.net/InfoCenter/index?page=content&channel=SECURITY_ADVISORIES&cat=SIRT_ADVISORY&sort=datemodified&dir=descending&max=200&batch=200&rss=true",  # Juniper SIRT advisories RSS
+    "checkpoint":"https://advisories.checkpoint.com/feeds.xml",                     # Fixed: was research blog
+    "juniper":   "https://supportportal.juniper.net/s/feed/0D5i000000pN0CRCA0",
     "citrix":    "https://support.citrix.com/feed/news",
     "aruba":     "https://support.hpe.com/hpesc/public/home/rss?docType=Security+Bulletin&sort=modified",
-    # zyxel: REMOVED — RSS URL returned empty in production; CVE coverage retained via cvelistV5.
+    "zyxel":     "https://www.zyxel.com/global/en/support/security-advisories/rss",
 
     # ══ ENDPOINT SECURITY ════════════════════════════════════════════════════
-    # sophos:  REMOVED — sophos.com/en-us/security-advisories.xml does not exist. CVE coverage retained via cvelistV5.
+    "sophos":        "https://www.sophos.com/en-us/security-advisories.xml",
     "trendmicro":    "https://success.trendmicro.com/dcx/s/feed/advisories?language=en_US",  # Fixed: was feedburner blog
-    # trellix: REMOVED — trellix.com/en-us/rss/security-advisories.xml does not exist. Bulletins live at kcm.trellix.com HTML only. CVE coverage retained via cvelistV5.
+    "trellix":       "https://www.trellix.com/en-us/rss/security-advisories.xml",
     "crowdstrike_blog": "https://www.crowdstrike.com/blog/feed/",
 
     # ══ CLOUD & INFRASTRUCTURE ═══════════════════════════════════════════════
@@ -794,25 +858,25 @@ TRUSTED_FEEDS = {
 
     # ══ MIDDLEWARE / DB / OPEN SOURCE ════════════════════════════════════════
     "mozilla":  "https://blog.mozilla.org/security/feed/",
-    "openssl":  "https://openssl-library.org/post/atom.xml",                       # Fixed: openssl.org → openssl-library.org (domain migrated 2024)
+    "openssl":  "https://www.openssl.org/news/secadv/rss.xml",                      # Fixed: was HTML page
     "apache":   "https://blogs.apache.org/security/feed/entries/rss",
-    # oracle: REMOVED — oracle.com/security-alerts/rss.xml returns 404; Oracle CPUs published as quarterly HTML pages only. CVE coverage retained via cvelistV5.
-    # vmware: REMOVED — community.broadcom.com/blogs/rss/4 returns empty post-Broadcom migration; VMSAs live as individual HTML pages, no RSS index. CVE coverage retained via cvelistV5.
+    "oracle":   "https://www.oracle.com/security-alerts/rss.xml",                   # Fixed: was CERT/CC
+    "vmware":   "https://community.broadcom.com/blogs/rss/4",
     "splunk":   "https://advisory.splunk.com/feed.xml",
     "veeam":    "https://www.veeam.com/rss/security-advisories.xml",
-    # nginx: REMOVED — nginx.org/en/security_advisories.html is HTML page, not RSS (was kept for link tracking). CVE coverage retained via cvelistV5.
+    "nginx":    "https://nginx.org/en/security_advisories.html",                    # HTML only — kept for link tracking
 
     # ══ ENTERPRISE APPS (NEW) ════════════════════════════════════════════════
     "sap":       "https://dam.sap.com/mac/app/e/rss/link.htm?fid=73554900100800001281",  # SAP Security Notes RSS
-    "adobe":     "https://blogs.adobe.com/psirt/atom.xml",                               # Adobe PSIRT atom feed (HTML scrape fallback configured below)
-    # atlassian: REMOVED — Atlassian has confirmed no public security advisory RSS exists (community request since 2017). Bulletins live at confluence.atlassian.com/security HTML only. CVE coverage retained via cvelistV5.
-    # gitlab:    REMOVED — about.gitlab.com/security/feed.xml returns 404; GitLab removed dedicated security RSS. CVE coverage retained via cvelistV5.
+    "adobe":     "https://helpx.adobe.com/security/security-bulletin.rss",               # Adobe PSIRT
+    "atlassian": "https://confluence.atlassian.com/security/rss.xml",                    # Atlassian Security Advisories
+    "gitlab":    "https://about.gitlab.com/security/feed.xml",                           # GitLab Security Releases
     "solarwinds":"https://www.solarwinds.com/shared-content/rss-feed/solarwinds-cve-rss-feed.xml",
-    # forescout: REMOVED — no advisory-specific RSS endpoint exists. CVE coverage retained via cvelistV5.
+    "forescout": "https://www.forescout.com/resources/feed/?type=advisory",
 
     # ══ ICS / OT (NEW) ═══════════════════════════════════════════════════════
     "siemens_ics":      "https://cert-portal.siemens.com/productcert/rss/advisories.atom",  # Siemens ProductCERT
-    # schneider_ics: REMOVED — download.schneider-electric.com returns 403 to cloud IPs (Render blocked by allowlist). CVE coverage retained via cvelistV5 (vendor=schneider-electric).
+    "schneider_ics":    "https://download.schneider-electric.com/files?p_Doc_Ref=SEVD-RSS",  # Schneider Electric PSIRT
 
     # ══ YOUR STACK ═══════════════════════════════════════════════════════════
     "proofpoint": "https://www.proofpoint.com/us/rss.xml",
@@ -822,7 +886,7 @@ TRUSTED_FEEDS = {
     "talos":       "https://feeds.feedburner.com/feedburner/Talos",
     "unit42":      "https://unit42.paloaltonetworks.com/feed/",
     "msft_ti":     "https://www.microsoft.com/en-us/security/blog/feed/",
-    # secureworks: REMOVED — Sophos acquired Secureworks in early 2025; secureworks.com now redirects to sophos.com (read timeout). Talos/Mandiant/Unit42 cover similar threat intel space.
+    "secureworks": "https://www.secureworks.com/rss?feed=blog",
     "recorded_fut":"https://therecord.media/feed/",
 
     # ══ NEWS & COMMUNITY ══════════════════════════════════════════════════════
@@ -839,7 +903,7 @@ TRUSTED_FEEDS = {
     # ══ RESEARCH / BLOGS (NEWS_SOURCES classification) ═══════════════════════
     "eset":         "https://www.welivesecurity.com/en/feed/",
     "malwarebytes": "https://www.malwarebytes.com/blog/feed/",
-    # netskope: REMOVED — netskope.com/blog/feed returned empty in production. CVE coverage retained via cvelistV5.
+    "netskope":     "https://www.netskope.com/blog/feed",
     "sentinelone":  "https://www.sentinelone.com/labs/feed/",
     "project_zero": "https://googleprojectzero.blogspot.com/feeds/posts/default",
     "cloudflare":   "https://blog.cloudflare.com/tag/security/rss/",
@@ -1386,7 +1450,7 @@ def is_within_window(published_str: str, is_kev: bool = False, is_zero_day: bool
         age_days = (datetime.now(timezone.utc) - pub).days
         if is_kev:      return age_days <= CACHE_RETENTION_DAYS["kev"]
         if is_zero_day: return age_days <= CACHE_RETENTION_DAYS["zeroday"]
-        return age_days <= CACHE_RETENTION_DAYS["default"]  # 90d default
+        return age_days <= CACHE_RETENTION_DAYS["default"]  # 90d (Medium/Low/Unknown)
     except Exception:
         return True  # If we can't parse, keep the item
 
@@ -1548,9 +1612,9 @@ def normalise_entry(entry, source:str) -> dict:
 RSS_PROXY_URL = "https://api.rss2json.com/v1/api.json?rss_url={url}"
 
 # Known IP-blocked feeds — try direct first, fall back to proxy
-# Note: checkpoint, forescout, sophos, trellix, secureworks removed — disabled in TRUSTED_FEEDS
 IP_BLOCKED_FEEDS = {
-    "juniper", "openssl", "android", "adobe", "ivanti",
+    "checkpoint", "forescout", "juniper", "openssl", "android",
+    "sophos", "trellix", "adobe", "secureworks", "ivanti",
 }
 
 def fetch_via_proxy(key: str, url: str) -> list:
@@ -1590,76 +1654,6 @@ def fetch_via_proxy(key: str, url: str) -> list:
         return []
 
 
-# ─── LAYER-3 FALLBACK: HTML SCRAPE ────────────────────────────────────────────
-# Last-resort fallback for vendors whose RSS feed has died but who still publish
-# advisories on an HTML listing page. Extracts links matching a regex and
-# converts them to feedparser-compatible pseudo-entries.
-HTML_SCRAPE_CONFIGS = {
-    "adobe": {
-        "url": "https://helpx.adobe.com/security/security-bulletin.html",
-        # Permissive pattern: matches any APSB bulletin link regardless of path depth
-        "link_pattern": r'href="(/security/products/[^"]+apsb\d+[^"]*\.html)"',
-        "base_url": "https://helpx.adobe.com",
-        "limit": 40,
-    },
-    "ivanti": {
-        "url": "https://www.ivanti.com/blog/topics/security-advisory",
-        "link_pattern": r'href="(/blog/[a-z0-9-]+(?:security|advisory|update|cve)[a-z0-9-]*)"',
-        "base_url": "https://www.ivanti.com",
-        "limit": 30,
-    },
-}
-
-def fetch_via_html_scrape(key: str) -> list:
-    """Layer-3 fallback: scrape HTML advisory listing pages when RSS dies."""
-    config = HTML_SCRAPE_CONFIGS.get(key)
-    if not config:
-        return []
-    try:
-        resp = requests.get(config["url"], timeout=20, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        })
-        if resp.status_code != 200:
-            log.debug(f"[{key}] HTML scrape: HTTP {resp.status_code}")
-            return []
-        html = resp.text
-        link_re = re.compile(config["link_pattern"], re.IGNORECASE)
-        seen = set()
-        items = []
-        for m in link_re.finditer(html):
-            link = m.group(1)
-            if link in seen:
-                continue
-            seen.add(link)
-            if not link.startswith("http"):
-                link = config["base_url"] + link
-            # Heuristic title from URL slug
-            slug = link.rstrip("/").split("/")[-1].replace(".html", "")
-            title = slug.replace("-", " ").replace("_", " ").upper() if slug.startswith("apsb") else slug.replace("-", " ").replace("_", " ").title()
-            # Build feedparser-compatible entry
-            class _FakeEntry: pass
-            e = _FakeEntry()
-            e.title       = title
-            e.link        = link
-            e.id          = link
-            e.summary     = f"{key.title()} security advisory — visit link for full details. (HTML scrape fallback)"
-            e.description = e.summary
-            e.published   = ""
-            e.updated     = ""
-            items.append(e)
-            if len(items) >= config.get("limit", 30):
-                break
-        if items:
-            log.info(f"[{key}] ✅ {len(items)} items via HTML scrape (fallback)")
-        else:
-            log.debug(f"[{key}] HTML scrape: no entries matched pattern")
-        return items
-    except Exception as e:
-        log.debug(f"[{key}] HTML scrape error: {e}")
-        return []
-
-
 def fetch_rss(key:str, url:str) -> list:
     if _feed_disabled.get(key,0) > time.time():
         log.debug(f"[{key}] Skipping — auto-disabled")
@@ -1667,14 +1661,6 @@ def fetch_rss(key:str, url:str) -> list:
     with cache_lock:
         if key in cache: return cache[key]
     if key == "mozilla": return fetch_mozilla_json()
-
-    # ── Cascading fallback chain ──
-    # Layer 1: Direct RSS  →  Layer 2: rss2json proxy  →  Layer 3: HTML scrape
-    items = []
-    fetch_source = "direct"
-    direct_error = None
-
-    # ── Layer 1: Direct RSS fetch ──
     try:
         # Add Accept header for feeds that require it (e.g. GitHub atom)
         extra_hdrs = {"Accept":"application/atom+xml,application/rss+xml,application/xml,text/xml,*/*"} if "github.com" in url else {}
@@ -1687,60 +1673,37 @@ def fetch_rss(key:str, url:str) -> list:
         feed  = feedparser.parse(resp.content)
         items = [x for x in [normalise_entry(e, key) for e in (feed.entries or [])[:50]] if x is not None]
         if feed.bozo and not items: log.debug(f"[{key}] Bozo (XML warning, data still parsed): {feed.bozo_exception}")
+        elif items: log.info(f"[{key}] ✅ {len(items)} items")
+        with cache_lock: cache[key] = items
+        threading.Thread(target=supa_record_feed_metrics,
+            args=(key,len(items),items,True,"",0),daemon=True).start()
+        _feed_failures[key]=0; _feed_disabled.pop(key,None)
+        return items
     except requests.exceptions.SSLError:
-        # SSL bypass retry (kept inline — counts as part of Layer 1)
         try:
             resp  = requests.get(url, timeout=15, verify=False, headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"})
             feed  = feedparser.parse(resp.content)
             items = [x for x in [normalise_entry(e, key) for e in (feed.entries or [])[:50]] if x is not None]
-            if items:
-                log.warning(f"[{key}] SSL bypass — {len(items)} items")
-                fetch_source = "ssl_bypass"
-        except Exception as e2:
-            direct_error = f"SSL: {e2}"
+            log.warning(f"[{key}] SSL bypass — {len(items)} items")
+            with cache_lock: cache[key] = items
+            threading.Thread(target=supa_record_feed_metrics,
+                args=(key,len(items),items,True,"",0),daemon=True).start()
+            return items
+        except Exception as e2: log.error(f"[{key}] SSL fallback: {e2}"); return []
     except Exception as e:
-        direct_error = str(e)
-
-    # ── Layer 2: rss2json proxy (IP-blocked feeds OR direct empty) ──
-    if not items and key in IP_BLOCKED_FEEDS:
-        log.info(f"[{key}] Layer 1 empty/failed — trying Layer 2 (rss2json proxy)")
-        items = fetch_via_proxy(key, url)
-        if items:
-            fetch_source = "proxy"
-
-    # ── Layer 3: HTML scrape (last resort) ──
-    if not items and key in HTML_SCRAPE_CONFIGS:
-        log.info(f"[{key}] Layer 2 empty/failed — trying Layer 3 (HTML scrape)")
-        scraped = fetch_via_html_scrape(key)
-        if scraped:
-            items = [x for x in [normalise_entry(e, key) for e in scraped[:50]] if x is not None]
+        # 403 on known IP-blocked feeds — try RSS proxy fallback before giving up
+        if ("403" in str(e) or "Forbidden" in str(e)) and key in IP_BLOCKED_FEEDS:
+            log.debug(f"[{key}] 403 — trying RSS proxy fallback")
+            items = fetch_via_proxy(key, url)
             if items:
-                fetch_source = "html_scrape"
-
-    # ── Record outcome ──
-    if items:
-        # Always log final outcome with source tag — makes Feed Health debugging accurate
-        if fetch_source == "direct":
-            log.info(f"[{key}] ✅ {len(items)} items")
-        else:
-            log.info(f"[{key}] ✅ {len(items)} items (recovered via {fetch_source})")
-        with cache_lock: cache[key] = items
+                with cache_lock: cache[key] = items
+                threading.Thread(target=supa_record_feed_metrics,
+                    args=(key,len(items),items,True,"proxy",0),daemon=True).start()
+                _feed_failures[key]=0; _feed_disabled.pop(key,None)
+                return items
+        log.error(f"[{key}] Failed: {e}")
         threading.Thread(target=supa_record_feed_metrics,
-            args=(key,len(items),items,True,fetch_source,0),daemon=True).start()
-        _feed_failures[key]=0; _feed_disabled.pop(key,None)
-        return items
-    else:
-        # Accurate error message: name only the layers that actually ran
-        has_l2 = key in IP_BLOCKED_FEEDS
-        has_l3 = key in HTML_SCRAPE_CONFIGS
-        if has_l2 or has_l3:
-            layers_ran = "L1" + (",L2" if has_l2 else "") + (",L3" if has_l3 else "")
-            err_msg = direct_error or f"all layers ({layers_ran}) returned empty"
-        else:
-            err_msg = direct_error or "Layer 1 returned 0 items (no fallbacks configured)"
-        log.error(f"[{key}] Failed: {err_msg}")
-        threading.Thread(target=supa_record_feed_metrics,
-            args=(key,0,[],False,err_msg[:200],0),daemon=True).start()
+            args=(key,0,[],False,str(e)[:200],0),daemon=True).start()
         _feed_failures[key]=_feed_failures.get(key,0)+1
         if _feed_failures[key]>=FEED_DISABLE_AFTER:
             _feed_disabled[key]=time.time()+(FEED_RETRY_AFTER_H*3600)
