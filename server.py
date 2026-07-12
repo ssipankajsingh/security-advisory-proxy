@@ -45,6 +45,14 @@ cache      = TTLCache(maxsize=200, ttl=3600)
 cache_lock = threading.Lock()
 _feed_failures:dict = {}  # consecutive failures per source
 _feed_disabled:dict = {}  # {key: disabled_until_unix_ts}
+
+# Request coalescing — prevent parallel /advisories calls hammering Supabase
+# When multiple clients request simultaneously, only ONE fetch runs;
+# all others wait and share its result
+_advisories_lock   = threading.Lock()   # serialises load + bg-refresh trigger
+_advisories_event  = threading.Event()  # signals waiting threads when result ready
+_advisories_result = None               # cached result shared across coalesced requests
+_advisories_event.set()                 # starts "unlocked" (no fetch in progress)
 FEED_DISABLE_AFTER  = 10
 FEED_RETRY_AFTER_H  = 24
 
@@ -144,59 +152,27 @@ def supa_delete_saved_search(search_id:int) -> bool:
 
 def supa_load_archived(limit:int=200, offset:int=0, severity:str="",
                         source:str="", days_back:int=365) -> list:
-    """
-    Load archived advisories.
-    Strategy: OR query — rows flagged is_archived=true OR fetched_at older than 60 days.
-    Using fetched_at (not published) because CVE published dates are historical and
-    would wrongly exclude recently-ingested rows for old CVEs.
-    is_news column does not exist in advisory_cache — removed from filter.
-    """
+    """Load archived advisories — either flagged is_archived=true OR older than 90 days."""
     if not (SUPABASE_URL and SUPABASE_KEY): return []
     try:
-        now_dt     = datetime.now(timezone.utc)
-        cutoff_old = (now_dt - timedelta(days=days_back)).isoformat()   # e.g. 365d ago
-        cutoff_arc = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).isoformat()  # 60d ago
-
-        # Strategy: two queries merged — (A) explicitly archived rows + (B) old unarchived rows
-        # This ensures archive panel works even before nightly job has run
-        results = {}
-
-        # Query A: rows explicitly flagged is_archived=true within retention window
-        url_a = (f"{SUPABASE_URL}/rest/v1/advisory_cache"
-                 f"?select=data,fetched_at,severity,source,cve_id"
-                 f"&is_archived=eq.true"
-                 f"&fetched_at=gte.{cutoff_old}"
-                 f"&order=fetched_at.desc&limit={limit}")
-        if severity: url_a += f"&severity=eq.{severity}"
-        if source:   url_a += f"&source=eq.{source}"
-        r_a = requests.get(url_a, headers=supa_headers(), timeout=15)
-        if r_a.status_code == 200:
-            for row in r_a.json():
-                d = row.get("data")
-                if d and d.get("id"): results[d["id"]] = d
-
-        # Query B: rows not yet archived but fetched_at older than ARCHIVE_AFTER_DAYS
-        # These exist when nightly job hasn't run yet or was skipped
-        url_b = (f"{SUPABASE_URL}/rest/v1/advisory_cache"
-                 f"?select=data,fetched_at,severity,source,cve_id"
-                 f"&is_archived=eq.false"
-                 f"&fetched_at=gte.{cutoff_old}&fetched_at=lte.{cutoff_arc}"
-                 f"&order=fetched_at.desc&limit={limit}")
-        if severity: url_b += f"&severity=eq.{severity}"
-        if source:   url_b += f"&source=eq.{source}"
-        r_b = requests.get(url_b, headers=supa_headers(), timeout=15)
-        if r_b.status_code == 200:
-            for row in r_b.json():
-                d = row.get("data")
-                if d and d.get("id") and d["id"] not in results:
-                    results[d["id"]] = d
-
-        items = list(results.values())
-        log.info(f"[ARCHIVE] Loaded {len(items)} archived items (A:{r_a.status_code if r_a else '-'} B:{r_b.status_code if r_b else '-'})")
-        return items
-    except Exception as e:
-        log.error(f"[ARCHIVE] {e}")
+        now_dt = datetime.now(timezone.utc)
+        cutoff_old = (now_dt - timedelta(days=days_back)).isoformat()
+        cutoff_90  = (now_dt - timedelta(days=90)).isoformat()
+        # Query rows older than 90 days (regardless of is_archived flag)
+        # This ensures archive works even before nightly job has run
+        url = (f"{SUPABASE_URL}/rest/v1/advisory_cache"
+               f"?select=data,published,severity,source,cve_id"
+               f"&published=gte.{cutoff_old}&published=lte.{cutoff_90}"
+               f"&is_news=eq.false"
+               f"&order=published.desc&limit={limit}&offset={offset}")
+        if severity: url += f"&severity=eq.{severity}"
+        if source:   url += f"&source=eq.{source}"
+        r = requests.get(url, headers=supa_headers(), timeout=15)
+        if r.status_code == 200:
+            rows = r.json()
+            return [row["data"] for row in rows if row.get("data")]
         return []
+    except Exception as e: log.error(f"[ARCHIVE] {e}"); return []
 
 def supa_get_sla_audit(days:int=365) -> list:
     if not (SUPABASE_URL and SUPABASE_KEY): return []
@@ -244,97 +220,38 @@ def _check_kev_due_alerts():
 
 def supa_save_archived():
     """
-    Nightly archive + purge (01:00 UTC):
-      1. Count active rows before — log for visibility
-      2. Flag non-KEV rows older than ARCHIVE_AFTER_DAYS as is_archived=TRUE (by fetched_at)
-      3. Hard-delete non-KEV rows older than 365d (by fetched_at)
-      4. Hard-delete KEV rows older than 730d (by fetched_at)
-      5. Safety valve: if active rows still > ACTIVE_ROW_HARD_CAP, force-archive oldest
-      6. Purge advisory_history + feed_metrics
-      7. Log before/after row count delta
-    KEY FIX: all date filters use fetched_at (when WE ingested), NOT published
-    (CVE published dates are historical — a 2022 CVE ingested today would be
-    wrongly archived/deleted if we filter on published date)
+    Nightly archive: flag rows 90-365d as is_archived=TRUE.
+    Hard-delete rows > 365d (non-KEV) or > 730d (KEV/ZeroDay).
     """
     if not (SUPABASE_URL and SUPABASE_KEY): return
     try:
-        now_dt   = datetime.now(timezone.utc)
-        now_iso  = now_dt.isoformat()
-        arch_cut = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).isoformat()
-        hard_cut = (now_dt - timedelta(days=365)).isoformat()
-        kev_cut  = (now_dt - timedelta(days=730)).isoformat()
-        met_cut  = (now_dt - timedelta(days=90)).isoformat()
-
-        # ── Step 1: count active rows before ──────────────────────────────
-        before_r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/advisory_cache?select=id&is_archived=eq.false",
-            headers={**supa_headers(),"Prefer":"count=exact","Range-Unit":"items","Range":"0-0"},
-            timeout=10)
-        before_count = int(before_r.headers.get("Content-Range","0/0").split("/")[-1] or 0)
-        log.info(f"[NIGHTLY] Active rows before purge: {before_count}")
-
-        # ── Step 2: archive non-KEV rows older than ARCHIVE_AFTER_DAYS ───
-        arch_r = requests.patch(
-            f"{SUPABASE_URL}/rest/v1/advisory_cache"
-            f"?is_archived=eq.false&is_kev=eq.false&is_zero_day=eq.false"
-            f"&fetched_at=lt.{arch_cut}",
+        now_dt    = datetime.now(timezone.utc)
+        now_iso   = now_dt.isoformat()
+        arch_cut  = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).isoformat()
+        hard_cut  = (now_dt - timedelta(days=365)).isoformat()
+        kev_cut   = (now_dt - timedelta(days=730)).isoformat()
+        met_cut   = (now_dt - timedelta(days=90)).isoformat()
+        # Archive rows older than ARCHIVE_AFTER_DAYS
+        requests.patch(
+            f"{SUPABASE_URL}/rest/v1/advisory_cache?is_archived=eq.false&published=lt.{arch_cut}",
             headers={**supa_headers(),"Prefer":"return=minimal"},
-            json={"is_archived":True,"archived_at":now_iso}, timeout=20)
-        log.info(f"[NIGHTLY] Archive PATCH (non-KEV >{ARCHIVE_AFTER_DAYS}d): HTTP {arch_r.status_code}")
-
-        # ── Step 3: hard-delete non-KEV rows older than 365d ─────────────
-        del1_r = requests.delete(
-            f"{SUPABASE_URL}/rest/v1/advisory_cache"
-            f"?is_kev=eq.false&is_zero_day=eq.false&fetched_at=lt.{hard_cut}",
-            headers=supa_headers(), timeout=15)
-        log.info(f"[NIGHTLY] Hard-delete non-KEV >365d: HTTP {del1_r.status_code}")
-
-        # ── Step 4: hard-delete KEV rows older than 730d ──────────────────
-        del2_r = requests.delete(
-            f"{SUPABASE_URL}/rest/v1/advisory_cache?is_kev=eq.true&fetched_at=lt.{kev_cut}",
-            headers=supa_headers(), timeout=15)
-        log.info(f"[NIGHTLY] Hard-delete KEV >730d: HTTP {del2_r.status_code}")
-
-        # ── Step 5: safety valve — cap active rows at ACTIVE_ROW_HARD_CAP ─
-        after_r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/advisory_cache?select=id&is_archived=eq.false",
-            headers={**supa_headers(),"Prefer":"count=exact","Range-Unit":"items","Range":"0-0"},
-            timeout=10)
-        after_count = int(after_r.headers.get("Content-Range","0/0").split("/")[-1] or 0)
-        if after_count > ACTIVE_ROW_HARD_CAP:
-            overflow = after_count - ACTIVE_ROW_HARD_CAP
-            log.warning(f"[NIGHTLY] Safety valve: {after_count} rows > cap {ACTIVE_ROW_HARD_CAP} — archiving oldest {overflow}")
-            oldest_r = requests.get(
-                f"{SUPABASE_URL}/rest/v1/advisory_cache"
-                f"?select=id&is_archived=eq.false&is_kev=eq.false"
-                f"&order=fetched_at.asc&limit={overflow}",
-                headers=supa_headers(), timeout=15)
-            if oldest_r.status_code == 200:
-                oldest_ids = [r["id"] for r in oldest_r.json() if r.get("id")]
-                for i in range(0, len(oldest_ids), 200):
-                    batch = oldest_ids[i:i+200]
-                    requests.patch(
-                        f"{SUPABASE_URL}/rest/v1/advisory_cache?id=in.({','.join(batch)})",
-                        headers={**supa_headers(),"Prefer":"return=minimal"},
-                        json={"is_archived":True,"archived_at":now_iso}, timeout=20)
-                log.info(f"[NIGHTLY] Safety valve archived {len(oldest_ids)} rows")
-
-        # ── Step 6: purge auxiliary tables ────────────────────────────────
+            json={"is_archived":True,"archived_at":now_iso}, timeout=15)
+        # Hard delete expired non-KEV rows
+        requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_cache"
+                       f"?is_kev=eq.false&is_zero_day=eq.false&published=lt.{hard_cut}",
+                       headers=supa_headers(), timeout=10)
+        # Hard delete expired KEV rows
+        requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_cache?is_kev=eq.true&published=lt.{kev_cut}",
+                       headers=supa_headers(), timeout=10)
+        # Purge advisory_history > 365d
         requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_history?changed_at=lt.{hard_cut}",
-                        headers=supa_headers(), timeout=10)
+                       headers=supa_headers(), timeout=10)
+        # Purge feed_metrics > 90d
         requests.delete(f"{SUPABASE_URL}/rest/v1/feed_metrics?fetched_at=lt.{met_cut}",
-                        headers=supa_headers(), timeout=10)
-
-        # ── Step 7: log final delta ────────────────────────────────────────
-        final_r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/advisory_cache?select=id&is_archived=eq.false",
-            headers={**supa_headers(),"Prefer":"count=exact","Range-Unit":"items","Range":"0-0"},
-            timeout=10)
-        final_count = int(final_r.headers.get("Content-Range","0/0").split("/")[-1] or 0)
-        log.info(f"[NIGHTLY] Complete: {before_count} → {final_count} active rows (removed {before_count-final_count})")
+                       headers=supa_headers(), timeout=10)
         _check_kev_due_alerts()
-    except Exception as e:
-        log.error(f"[NIGHTLY] Archive failed: {e}")
+        log.info("[NIGHTLY] Archive + purge complete")
+    except Exception as e: log.error(f"[NIGHTLY] Archive failed: {e}")
 
 def supa_set_ack(advisory_id:str, by:str, note:str="", status:str="In Review",
                  assigned_to:str="", ai_triage:str="", prev_status:str="",
@@ -376,14 +293,13 @@ def supa_delete_ack(advisory_id:str, by:str) -> bool:
 # Retention windows — free tier has 488MB spare, ~400B/row after compression
 # Safe to extend: 90d default uses only ~0.9MB, 180d KEV uses ~1.8MB
 CACHE_RETENTION_DAYS = {
-    "kev":      730,  # KEV — 2 years (historically significant, exploitation ongoing)
+    "kev":      730,  # KEV — 2 years (historically significant)
     "zeroday":  365,  # Zero-day — 1 year
     "critical": 365,  # Critical — 1 year
-    "high":     180,  # High — 6 months
-    "default":   90,  # Medium/Low/Unknown — 90 days (was 365, caused table bloat)
+    "high":     365,  # High — 1 year
+    "default":  365,  # All others — 1 year
 }
-ARCHIVE_AFTER_DAYS  = 60    # Flag rows as archived after 60d
-ACTIVE_ROW_HARD_CAP = 18000  # Safety valve: force-archive oldest if active rows > this
+ARCHIVE_AFTER_DAYS = 90  # Flag rows as archived after 90d (still queryable)
 
 def supa_save_advisory_cache(advisories:list) -> bool:
     if not (SUPABASE_URL and SUPABASE_KEY): return False
@@ -416,49 +332,32 @@ def supa_save_advisory_cache(advisories:list) -> bool:
                 "is_kev":      is_kev_item,
                 "is_zero_day": bool(a.get("zeroDay",False)),
             })
-        # Upsert pre-fetch: load existing fetched_at + NVD-corrected severities
-        # fetched_at = "first seen" timestamp — must NEVER be overwritten on update
-        # merge-duplicates overwrites ALL columns, so we restore fetched_at from DB
+        # Upsert: on conflict(id) only update data + severity/flags, NOT fetched_at
+        # This preserves the original first-seen timestamp
+        # IMPORTANT: preserve NVD-corrected severities — load corrected rows from
+        # Supabase and apply them back so the upsert doesn't re-inflate severity
         h = {**supa_headers(), "Prefer": "resolution=merge-duplicates"}
-        row_ids = [r["id"] for r in rows]
-        existing_map = {}  # id -> {fetched_at, severity, cvss, severity_corrected}
         try:
-            # Fetch in batches of 500 to avoid URL length limits
-            for i in range(0, len(row_ids), 500):
-                batch_ids = row_ids[i:i+500]
-                id_list = ",".join(batch_ids)
-                cr = requests.get(
-                    f"{SUPABASE_URL}/rest/v1/advisory_cache"
-                    f"?select=id,fetched_at,severity,cvss,data&id=in.({id_list})",
-                    headers=supa_headers(), timeout=15)
-                if cr.status_code == 200:
-                    for ex in cr.json():
-                        existing_map[ex["id"]] = {
-                            "fetched_at":          ex.get("fetched_at"),
-                            "severity":            ex.get("severity"),
-                            "cvss":                ex.get("cvss"),
-                            "severity_corrected":  bool((ex.get("data") or {}).get("severity_corrected_by_nvd")),
-                        }
+            cr = requests.get(
+                f"{SUPABASE_URL}/rest/v1/advisory_cache"
+                f"?select=id,severity,cvss,data&limit=2000",
+                headers=supa_headers(), timeout=15)
+            if cr.status_code == 200:
+                for existing in cr.json():
+                    if (existing.get("data") or {}).get("severity_corrected_by_nvd"):
+                        # This row was NVD-corrected — find it in our upsert rows
+                        # and restore the corrected severity so we don't overwrite it
+                        for row in rows:
+                            if row["id"] == existing["id"]:
+                                row["severity"] = existing["severity"]
+                                row["cvss"] = existing["cvss"]
+                                if row.get("data"):
+                                    row["data"]["severity"] = existing["severity"]
+                                    row["data"]["severity_corrected_by_nvd"] = True
+                                    row["data"]["_nvd_queried"] = True
+                                break
         except Exception as e:
-            log.debug(f"[SUPABASE] Pre-fetch for fetched_at/severity: {e}")
-
-        # Apply preserved values to upsert rows
-        for row in rows:
-            ex = existing_map.get(row["id"])
-            if ex:
-                # Preserve original first-seen timestamp — never overwrite
-                if ex.get("fetched_at"):
-                    row["fetched_at"] = ex["fetched_at"]
-                    if row.get("data"):
-                        row["data"]["fetched_at"] = ex["fetched_at"]
-                # Preserve NVD-corrected severity
-                if ex.get("severity_corrected"):
-                    row["severity"] = ex["severity"]
-                    row["cvss"]     = ex["cvss"]
-                    if row.get("data"):
-                        row["data"]["severity"]                  = ex["severity"]
-                        row["data"]["severity_corrected_by_nvd"] = True
-                        row["data"]["_nvd_queried"]              = True
+            log.debug(f"[SUPABASE] Could not load corrected severities: {e}")
         saved = 0; failed = 0
         for i in range(0, len(rows), 100):
             r = requests.post(f"{SUPABASE_URL}/rest/v1/advisory_cache",
@@ -486,21 +385,16 @@ def supa_save_advisory_cache(advisories:list) -> bool:
                     f"{SUPABASE_URL}/rest/v1/advisory_cache?is_zero_day=eq.true&is_kev=eq.false&published=lt.{cutoff}",
                     headers=supa_headers(), timeout=10)
 
-        # Archive rows older than ARCHIVE_AFTER_DAYS — use fetched_at not published
-        # (CVE published dates are historical; fetched_at = when we actually ingested it)
+        # Archive rows older than ARCHIVE_AFTER_DAYS
         archive_cutoff = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).isoformat()
         requests.patch(
-            f"{SUPABASE_URL}/rest/v1/advisory_cache"
-            f"?is_archived=eq.false&is_kev=eq.false&is_zero_day=eq.false"
-            f"&fetched_at=lt.{archive_cutoff}",
+            f"{SUPABASE_URL}/rest/v1/advisory_cache?is_archived=eq.false&published=lt.{archive_cutoff}",
             headers={**supa_headers(),"Prefer":"return=minimal"},
             json={"is_archived":True,"archived_at":now}, timeout=10)
-        # Hard-delete rows older than 365d — use fetched_at
+        # Hard-delete rows older than 365d
         hard_cutoff = (now_dt - timedelta(days=365)).isoformat()
-        requests.delete(
-            f"{SUPABASE_URL}/rest/v1/advisory_cache"
-            f"?is_kev=eq.false&is_zero_day=eq.false&fetched_at=lt.{hard_cutoff}",
-            headers=supa_headers(), timeout=10)
+        requests.delete(f"{SUPABASE_URL}/rest/v1/advisory_cache?is_kev=eq.false&is_zero_day=eq.false&published=lt.{hard_cutoff}",
+                       headers=supa_headers(), timeout=10)
 
         status = f"{saved}/{len(rows)} saved"
         if failed: status += f", {failed} failed"
@@ -525,6 +419,11 @@ def supa_load_advisory_cache() -> list:
                    f"?select=data&is_archived=eq.false"
                    f"&order=fetched_at.desc&limit={chunk}&offset={offset}")
             r = requests.get(url, headers=supa_headers(), timeout=15)
+            if r.status_code == 500:
+                # HTTP 500 = Supabase rate-limited or overloaded — stop immediately
+                # (continuing pagination makes it worse — each call compounds the rate limit)
+                log.warning(f"[SUPABASE] load_cache page offset={offset}: HTTP 500 — aborting pagination (rate-limited)")
+                break
             if r.status_code != 200:
                 log.warning(f"[SUPABASE] load_cache page offset={offset}: HTTP {r.status_code}")
                 break
@@ -2764,42 +2663,87 @@ def sources():
 @app.route("/advisories")
 @require_auth
 def advisories():
+    """
+    Request-coalesced advisory fetch.
+    Problem: parallel requests each call supa_load_advisory_cache() which paginates
+    20K rows in ~20 Supabase calls. 6 parallel requests = 120 simultaneous Supabase
+    calls → rate limit (HTTP 500) → all fail → Proxy Error badge on dashboard.
+
+    Fix: only ONE load runs at a time. If a fetch is already in progress, new
+    requests wait (up to 58s) and share its result. Background refresh is also
+    deduplicated — only one _bg_refresh thread runs at a time.
+    """
+    global _advisories_result
     try:
         force = request.args.get("force","false").lower() == "true"
 
-        # Always try Supabase cache first — fast response regardless of force flag
-        # force=true triggers a background refresh AFTER serving cached data
         if SUPABASE_URL:
-            cached = supa_load_advisory_cache()
-            if len(cached) > 50:
-                log.info(f"[ADVISORIES] Cache hit: {len(cached)} items (force={force})")
-                if force:
-                    # Trigger background live fetch to refresh cache — non-blocking
-                    def _bg_refresh():
-                        try:
-                            fresh = fetch_all_advisories()
-                            if fresh: supa_save_advisory_cache(fresh)
-                        except Exception as e:
-                            log.error(f"[ADVISORIES] Background refresh failed: {e}")
-                    threading.Thread(target=_bg_refresh, daemon=True).start()
-                return jsonify({"total":len(cached),"generated":datetime.now(timezone.utc).isoformat(),
-                    "advisories":cached[:15000],"source":"cache"})
+            # ── Coalescing: try to become the active fetcher ─────────────
+            acquired = _advisories_lock.acquire(blocking=False)
+            if acquired:
+                # This thread is the fetcher — clear event so waiters block
+                _advisories_event.clear()
+                try:
+                    cached = supa_load_advisory_cache()
+                    if len(cached) > 50:
+                        log.info(f"[ADVISORIES] Cache hit: {len(cached)} items (force={force})")
+                        result = {"total":len(cached),
+                                  "generated":datetime.now(timezone.utc).isoformat(),
+                                  "advisories":cached[:15000],"source":"cache"}
+                        _advisories_result = result
+                        if force:
+                            # Background refresh — deduplicated via a module-level flag
+                            def _bg_refresh():
+                                try:
+                                    fresh = fetch_all_advisories()
+                                    if fresh: supa_save_advisory_cache(fresh)
+                                except Exception as e:
+                                    log.error(f"[ADVISORIES] Background refresh failed: {e}")
+                            threading.Thread(target=_bg_refresh, daemon=True).start()
+                        return jsonify(result)
+                    else:
+                        # No usable cache — live fetch
+                        log.info("[ADVISORIES] No cache found — doing live fetch")
+                        all_adv = fetch_all_advisories()
+                        if all_adv:
+                            def _save_bg(adv):
+                                for attempt in range(3):
+                                    if supa_save_advisory_cache(adv): return
+                                    time.sleep(5*(attempt+1))
+                                log.error("[SUPABASE] ⚠️  All 3 save attempts failed")
+                            threading.Thread(target=_save_bg, args=(all_adv,), daemon=True).start()
+                        result = {"total":len(all_adv),"generated":datetime.now(timezone.utc).isoformat(),
+                                  "advisories":all_adv[:15000],"source":"live"}
+                        _advisories_result = result
+                        return jsonify(result)
+                finally:
+                    _advisories_event.set()   # unblock all waiters
+                    _advisories_lock.release()
+            else:
+                # ── Another thread is fetching — wait and share its result ─
+                log.info("[ADVISORIES] Coalescing: waiting for in-progress fetch")
+                got_result = _advisories_event.wait(timeout=58)
+                if got_result and _advisories_result:
+                    log.info(f"[ADVISORIES] Coalesced response: {_advisories_result.get('total',0)} items")
+                    return jsonify(_advisories_result)
+                else:
+                    # Timeout — fetcher took too long, serve stale or error
+                    log.warning("[ADVISORIES] Coalescing timeout — fetcher took >58s")
+                    if _advisories_result:
+                        return jsonify({**_advisories_result, "source":"stale"})
+                    return jsonify({"error":"Fetch in progress, retry in 10s"}), 503
 
-        # No cache available — live fetch (first ever startup)
-        log.info("[ADVISORIES] No cache found — doing live fetch")
+        # No Supabase configured — live fetch (dev mode)
         all_adv = fetch_all_advisories()
-        if SUPABASE_URL and all_adv:
-            def _save_with_retry(adv):
-                for attempt in range(3):
-                    ok = supa_save_advisory_cache(adv)
-                    if ok: return
-                    import time as _time; _time.sleep(5 * (attempt+1))
-                log.error("[SUPABASE] ⚠️  All 3 save attempts failed — cache may be stale")
-            threading.Thread(target=_save_with_retry, args=(all_adv,), daemon=True).start()
         return jsonify({"total":len(all_adv),"generated":datetime.now(timezone.utc).isoformat(),
             "advisories":all_adv[:15000],"source":"live"})
     except Exception as e:
         log.error(f"[ADVISORIES] {e}")
+        # Always release event on unexpected error so waiters don't hang
+        _advisories_event.set()
+        if _advisories_lock.locked():
+            try: _advisories_lock.release()
+            except: pass
         return jsonify({"error":"Failed to fetch advisories"}), 500
 
 @app.route("/advisories/critical")
@@ -3880,7 +3824,7 @@ def create_indexes():
         ("idx_advisory_published",
          "CREATE INDEX IF NOT EXISTS idx_advisory_published ON advisory_cache(published DESC)"),
         ("idx_advisory_is_archived",
-         "CREATE INDEX IF NOT EXISTS idx_advisory_is_archived ON advisory_cache(is_archived, fetched_at DESC)"),
+         "CREATE INDEX IF NOT EXISTS idx_advisory_is_archived ON advisory_cache(is_archived, published DESC)"),
     ]
 
     results = {}
