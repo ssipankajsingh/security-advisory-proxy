@@ -2751,90 +2751,101 @@ def db_health():
 def sources():
     return jsonify({"total":SOURCE_COUNT,"sources":list(TRUSTED_FEEDS.keys()),"oem_tier1":list(OEM_TIER1)})
 
+# Track background refresh so we never run two at once
+_bg_refresh_running = threading.Event()   # set = refresh in progress
+
 @app.route("/advisories")
 @require_auth
 def advisories():
     """
-    Request-coalesced advisory fetch.
-    Problem: parallel requests each call supa_load_advisory_cache() which paginates
-    20K rows in ~20 Supabase calls. 6 parallel requests = 120 simultaneous Supabase
-    calls → rate limit (HTTP 500) → all fail → Proxy Error badge on dashboard.
+    Fast-path advisory fetch with request coalescing.
 
-    Fix: only ONE load runs at a time. If a fetch is already in progress, new
-    requests wait (up to 58s) and share its result. Background refresh is also
-    deduplicated — only one _bg_refresh thread runs at a time.
+    Core principle: ALWAYS respond fast (< 3s) by serving Supabase cache.
+    Never hold the response waiting for a slow live feed fetch.
+
+    Flow:
+      1. Acquire coalescing lock (non-blocking)
+         - If acquired: load Supabase cache → respond immediately → release lock
+           Then optionally kick off background refresh (non-blocking thread)
+         - If not acquired: wait for in-progress load to finish → share its result
+      2. Background refresh (fetch_all_advisories) runs in a daemon thread,
+         completely decoupled from the HTTP response. Lock is NOT held during it.
+      3. On cold start (cache empty): return empty immediately + trigger bg refresh.
+         Frontend will auto-retry via its refresh timer and get data once bg completes.
+
+    This eliminates the deadlock where a slow live fetch held the lock for 45s,
+    causing all subsequent requests to queue, timeout, and show Proxy Error.
     """
     global _advisories_result
     try:
         force = request.args.get("force","false").lower() == "true"
 
         if SUPABASE_URL:
-            # ── Coalescing: try to become the active fetcher ─────────────
+            # ── Step 1: coalesced Supabase cache read (fast, ~2s) ────────
             acquired = _advisories_lock.acquire(blocking=False)
             if acquired:
-                # This thread is the fetcher — clear event so waiters block
                 _advisories_event.clear()
                 try:
                     cached = supa_load_advisory_cache()
-                    if len(cached) > 50:
-                        log.info(f"[ADVISORIES] Cache hit: {len(cached)} items (force={force})")
-                        result = {"total":len(cached),
-                                  "generated":datetime.now(timezone.utc).isoformat(),
-                                  "advisories":cached[:15000],"source":"cache"}
-                        _advisories_result = result
-                        if force:
-                            # Background refresh — deduplicated via a module-level flag
-                            def _bg_refresh():
-                                try:
-                                    fresh = fetch_all_advisories()
-                                    if fresh: supa_save_advisory_cache(fresh)
-                                except Exception as e:
-                                    log.error(f"[ADVISORIES] Background refresh failed: {e}")
-                            threading.Thread(target=_bg_refresh, daemon=True).start()
-                        return jsonify(result)
-                    else:
-                        # No usable cache — live fetch
-                        log.info("[ADVISORIES] No cache found — doing live fetch")
-                        all_adv = fetch_all_advisories()
-                        if all_adv:
-                            def _save_bg(adv):
-                                for attempt in range(3):
-                                    if supa_save_advisory_cache(adv): return
-                                    time.sleep(5*(attempt+1))
-                                log.error("[SUPABASE] ⚠️  All 3 save attempts failed")
-                            threading.Thread(target=_save_bg, args=(all_adv,), daemon=True).start()
-                        result = {"total":len(all_adv),"generated":datetime.now(timezone.utc).isoformat(),
-                                  "advisories":all_adv[:15000],"source":"live"}
-                        _advisories_result = result
-                        return jsonify(result)
+                    result = {
+                        "total":     len(cached),
+                        "generated": datetime.now(timezone.utc).isoformat(),
+                        "advisories":cached[:15000],
+                        "source":    "cache" if cached else "empty",
+                    }
+                    _advisories_result = result
+                    log.info(f"[ADVISORIES] Cache {'hit' if cached else 'empty'}: {len(cached)} items (force={force})")
                 finally:
-                    _advisories_event.set()   # unblock all waiters
-                    _advisories_lock.release()
-            else:
-                # ── Another thread is fetching — wait and share its result ─
-                log.info("[ADVISORIES] Coalescing: waiting for in-progress fetch")
-                got_result = _advisories_event.wait(timeout=58)
-                if got_result and _advisories_result:
-                    log.info(f"[ADVISORIES] Coalesced response: {_advisories_result.get('total',0)} items")
-                    return jsonify(_advisories_result)
-                else:
-                    # Timeout — fetcher took too long, serve stale or error
-                    log.warning("[ADVISORIES] Coalescing timeout — fetcher took >58s")
-                    if _advisories_result:
-                        return jsonify({**_advisories_result, "source":"stale"})
-                    return jsonify({"error":"Fetch in progress, retry in 10s"}), 503
+                    _advisories_event.set()    # release waiters immediately after cache read
+                    _advisories_lock.release() # lock held only for the fast cache read
 
-        # No Supabase configured — live fetch (dev mode)
+                # ── Step 2: background refresh (decoupled from response) ──
+                # Runs when: force=true, OR cache was empty (cold start)
+                should_refresh = force or not cached
+                if should_refresh and not _bg_refresh_running.is_set():
+                    _bg_refresh_running.set()
+                    def _bg_refresh():
+                        try:
+                            log.info("[ADVISORIES] Background refresh started")
+                            fresh = fetch_all_advisories()
+                            if fresh:
+                                supa_save_advisory_cache(fresh)
+                                log.info(f"[ADVISORIES] Background refresh complete: {len(fresh)} advisories saved")
+                        except Exception as e:
+                            log.error(f"[ADVISORIES] Background refresh failed: {e}")
+                        finally:
+                            _bg_refresh_running.clear()
+                    threading.Thread(target=_bg_refresh, daemon=True).start()
+                elif should_refresh:
+                    log.info("[ADVISORIES] Background refresh already running — skipping duplicate")
+
+                return jsonify(result)
+
+            else:
+                # ── Another thread is loading cache — wait and share result ─
+                log.info("[ADVISORIES] Coalescing: waiting for in-progress cache read")
+                got = _advisories_event.wait(timeout=10)  # cache read is fast; 10s plenty
+                if got and _advisories_result:
+                    log.info(f"[ADVISORIES] Coalesced: {_advisories_result.get('total',0)} items")
+                    return jsonify(_advisories_result)
+                # Timeout on cache read — return whatever we have or empty
+                log.warning("[ADVISORIES] Coalescing timeout on cache read")
+                if _advisories_result:
+                    return jsonify({**_advisories_result, "source":"stale"})
+                return jsonify({"total":0,"advisories":[],"source":"empty",
+                                "generated":datetime.now(timezone.utc).isoformat()})
+
+        # No Supabase — live fetch (dev/local mode only)
         all_adv = fetch_all_advisories()
         return jsonify({"total":len(all_adv),"generated":datetime.now(timezone.utc).isoformat(),
             "advisories":all_adv[:15000],"source":"live"})
+
     except Exception as e:
-        log.error(f"[ADVISORIES] {e}")
-        # Always release event on unexpected error so waiters don't hang
-        _advisories_event.set()
-        if _advisories_lock.locked():
-            try: _advisories_lock.release()
-            except: pass
+        log.error(f"[ADVISORIES] Unhandled error: {e}")
+        _advisories_event.set()   # never leave waiters hanging
+        try:
+            if _advisories_lock.locked(): _advisories_lock.release()
+        except: pass
         return jsonify({"error":"Failed to fetch advisories"}), 500
 
 @app.route("/advisories/critical")
