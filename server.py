@@ -503,17 +503,17 @@ def supa_load_advisory_cache() -> list:
     if not (SUPABASE_URL and SUPABASE_KEY): return []
     all_items = []
     offset = 0
-    chunk = 1000
+    chunk = 500   # smaller pages = less timeout risk on Supabase free tier
     while True:
         try:
             url = (f"{SUPABASE_URL}/rest/v1/advisory_cache"
                    f"?select=data&is_archived=eq.false"
                    f"&order=fetched_at.desc&limit={chunk}&offset={offset}")
-            r = requests.get(url, headers=supa_headers(), timeout=15)
-            if r.status_code == 500:
-                # HTTP 500 = Supabase rate-limited or overloaded — stop immediately
-                # (continuing pagination makes it worse — each call compounds the rate limit)
-                log.warning(f"[SUPABASE] load_cache page offset={offset}: HTTP 500 — aborting pagination (rate-limited)")
+            r = requests.get(url, headers=supa_headers(), timeout=20)
+            if r.status_code in (500, 429):
+                # HTTP 500/429 = Supabase rate-limited — stop pagination immediately
+                # Return what we already have rather than empty — partial data beats nothing
+                log.warning(f"[SUPABASE] load_cache page offset={offset}: HTTP {r.status_code} — returning {len(all_items)} items fetched so far")
                 break
             if r.status_code != 200:
                 log.warning(f"[SUPABASE] load_cache page offset={offset}: HTTP {r.status_code}")
