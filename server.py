@@ -162,8 +162,8 @@ def supa_load_archived(limit:int=200, offset:int=0, severity:str="",
     if not (SUPABASE_URL and SUPABASE_KEY): return []
     try:
         now_dt     = datetime.now(timezone.utc)
-        cutoff_old = (now_dt - timedelta(days=days_back)).isoformat()
-        cutoff_arc = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).isoformat()
+        cutoff_old = (now_dt - timedelta(days=days_back)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cutoff_arc = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
         results    = {}
 
         # Query A: explicitly archived rows within retention window
@@ -202,7 +202,7 @@ def supa_load_archived(limit:int=200, offset:int=0, severity:str="",
 def supa_get_sla_audit(days:int=365) -> list:
     if not (SUPABASE_URL and SUPABASE_KEY): return []
     try:
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
         r = requests.get(
             f"{SUPABASE_URL}/rest/v1/sla_audit_log?order=breached_at.desc&limit=500&breached_at=gte.{cutoff}",
             headers=supa_headers(), timeout=10)
@@ -254,10 +254,10 @@ def supa_save_archived():
     try:
         now_dt   = datetime.now(timezone.utc)
         now_iso  = now_dt.isoformat()
-        arch_cut = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).isoformat()
-        hard_cut = (now_dt - timedelta(days=365)).isoformat()
-        kev_cut  = (now_dt - timedelta(days=730)).isoformat()
-        met_cut  = (now_dt - timedelta(days=90)).isoformat()
+        arch_cut = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        hard_cut = (now_dt - timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        kev_cut  = (now_dt - timedelta(days=730)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        met_cut  = (now_dt - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         # Count active rows before
         before_r = requests.get(
@@ -463,7 +463,7 @@ def supa_save_advisory_cache(advisories:list) -> bool:
             ("KEV",      CACHE_RETENTION_DAYS["kev"]),
             ("ZeroDay",  CACHE_RETENTION_DAYS["zeroday"]),
         ]:
-            cutoff = (now_dt - timedelta(days=days)).isoformat()
+            cutoff = (now_dt - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
             if retention_type == "KEV":
                 requests.delete(
                     f"{SUPABASE_URL}/rest/v1/advisory_cache?is_kev=eq.true&published=lt.{cutoff}",
@@ -474,14 +474,14 @@ def supa_save_advisory_cache(advisories:list) -> bool:
                     headers=supa_headers(), timeout=10)
 
         # Archive non-KEV rows older than ARCHIVE_AFTER_DAYS (use fetched_at, not published)
-        archive_cutoff = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).isoformat()
+        archive_cutoff = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
         requests.patch(
             f"{SUPABASE_URL}/rest/v1/advisory_cache"
             f"?is_archived=eq.false&is_kev=eq.false&is_zero_day=eq.false&fetched_at=lt.{archive_cutoff}",
             headers={**supa_headers(),"Prefer":"return=minimal"},
             json={"is_archived":True,"archived_at":now}, timeout=10)
         # Hard-delete rows older than 365d (use fetched_at, not published)
-        hard_cutoff = (now_dt - timedelta(days=365)).isoformat()
+        hard_cutoff = (now_dt - timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
         requests.delete(
             f"{SUPABASE_URL}/rest/v1/advisory_cache"
             f"?is_kev=eq.false&is_zero_day=eq.false&fetched_at=lt.{hard_cutoff}",
@@ -559,7 +559,7 @@ def supa_set_source_config(source_id:str, enabled:bool, updated_by:str) -> bool:
 def supa_purge_old_acks():
     if not (SUPABASE_URL and SUPABASE_KEY): return
     try:
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=365)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
         requests.delete(f"{SUPABASE_URL}/rest/v1/acknowledgments?acknowledged_at=lt.{cutoff}", headers=supa_headers(), timeout=10)
         log.info("[SUPABASE] Old acks purged")
     except Exception as e: log.error(f"[SUPABASE] purge_acks: {e}")
