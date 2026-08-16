@@ -4053,24 +4053,151 @@ def fetch_now():
 # MCP endpoints allow AI interfaces to discover and call tools natively
 # ──────────────────────────────────────────────────────────────────────────────
 
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 2 — API KEY VALIDATION + RATE LIMITING
+# ══════════════════════════════════════════════════════════════════════════════
+# In-memory cache (no Redis needed — free tier compatible)
+# Keys cached for 5 min, rate limit counters reset hourly
+# Usage stats written to Supabase async (non-blocking)
+# ──────────────────────────────────────────────────────────────────────────────
+
+import secrets
+import hashlib
+
+# In-memory key cache: {key -> {name, tier, rate_limit, is_active, expires_at}}
+_key_cache: dict = {}
+_key_cache_ts: dict = {}          # key -> last_loaded_unix_ts
+KEY_CACHE_TTL = 300               # 5 minutes
+
+# In-memory rate limit counters: {key -> {count, window_start}}
+_rate_counters: dict = {}
+_rate_lock = threading.Lock()
+
+
+def _load_api_key(key: str) -> dict | None:
+    """Load key from in-memory cache or Supabase. Returns None if invalid."""
+    now = time.time()
+    # Cache hit
+    if key in _key_cache and (now - _key_cache_ts.get(key, 0)) < KEY_CACHE_TTL:
+        return _key_cache[key]
+    # Cache miss — fetch from Supabase
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        # Fallback: accept legacy ACCESS_CODE if Supabase unavailable
+        if key == ACCESS_CODE:
+            return {"name":"Internal","tier":"internal","rate_limit_per_hour":9999,"is_active":True}
+        return None
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/api_keys?key=eq.{key}&is_active=eq.true&select=*",
+            headers=supa_headers(), timeout=5)
+        if r.status_code == 200 and r.json():
+            row = r.json()[0]
+            # Check expiry
+            if row.get("expires_at"):
+                exp = datetime.fromisoformat(row["expires_at"].replace("Z","+00:00"))
+                if exp < datetime.now(timezone.utc):
+                    _key_cache.pop(key, None)
+                    return None
+            _key_cache[key]    = row
+            _key_cache_ts[key] = now
+            return row
+        # Not found — cache the miss briefly to avoid hammering Supabase
+        _key_cache[key]    = None
+        _key_cache_ts[key] = now
+        return None
+    except Exception as e:
+        log.warning(f"[API-KEY] Supabase lookup failed: {e} — falling back to ACCESS_CODE check")
+        if key == ACCESS_CODE:
+            return {"name":"Internal (fallback)","tier":"internal","rate_limit_per_hour":9999,"is_active":True}
+        return None
+
+
+def _check_rate_limit(key: str, limit: int) -> tuple[bool, int, int]:
+    """
+    Check rate limit. Returns (allowed, current_count, limit).
+    Window resets every hour. Thread-safe.
+    """
+    now = time.time()
+    window_start = now - (now % 3600)  # top of current hour
+    with _rate_lock:
+        entry = _rate_counters.get(key, {"count": 0, "window_start": window_start})
+        # New hour — reset counter
+        if entry["window_start"] < window_start:
+            entry = {"count": 0, "window_start": window_start}
+        entry["count"] += 1
+        _rate_counters[key] = entry
+        return (entry["count"] <= limit, entry["count"], limit)
+
+
+def _record_usage_async(key: str, endpoint: str):
+    """Fire-and-forget: update last_used_at + total_requests in Supabase."""
+    def _write():
+        try:
+            requests.patch(
+                f"{SUPABASE_URL}/rest/v1/api_keys?key=eq.{key}",
+                headers={**supa_headers(), "Prefer": "return=minimal"},
+                json={"last_used_at": datetime.now(timezone.utc).isoformat(),
+                      "total_requests": None},  # incremented via SQL trigger or manual
+                timeout=5)
+        except Exception:
+            pass
+    threading.Thread(target=_write, daemon=True).start()
+
+
 def require_api_key(f):
     """
-    Phase 1 API auth — accepts either:
-      - X-API-Key: <ACCESS_CODE>        (header, preferred)
-      - ?api_key=<ACCESS_CODE>          (query param, for quick testing)
-    Phase 2 will replace this with per-key Supabase lookup + rate limiting.
+    Phase 2 API auth — full key validation + rate limiting.
+    Accepts X-API-Key header or ?api_key= query param.
+    Keys validated against Supabase api_keys table (5-min cache).
+    Rate limits enforced per key per hour (in-memory, free tier compatible).
     """
     @wraps(f)
     def decorated(*args, **kwargs):
         key = (request.headers.get("X-API-Key","") or
                request.args.get("api_key",""))
-        if not key or key != ACCESS_CODE:
+        if not key:
             return jsonify({
                 "error":   "Unauthorized",
-                "message": "Provide a valid API key via X-API-Key header or ?api_key= param",
+                "message": "API key required. Use X-API-Key header or ?api_key= param.",
                 "docs":    "https://ssipankajsingh.github.io/security-advisory-dashboard/api-docs"
             }), 401
-        return f(*args, **kwargs)
+
+        key_data = _load_api_key(key)
+        if not key_data:
+            return jsonify({
+                "error":   "Invalid API key",
+                "message": "Key not found, inactive, or expired.",
+                "docs":    "https://ssipankajsingh.github.io/security-advisory-dashboard/api-docs"
+            }), 403
+
+        # Rate limiting
+        limit   = key_data.get("rate_limit_per_hour", 100)
+        allowed, count, cap = _check_rate_limit(key, limit)
+        if not allowed:
+            return jsonify({
+                "error":       "Rate limit exceeded",
+                "limit":       cap,
+                "used":        count,
+                "resets_in":   f"{int(3600 - (time.time() % 3600))}s",
+                "tier":        key_data.get("tier","standard"),
+            }), 429
+
+        # Attach key metadata to request context for use in route handlers
+        request.api_key_data = key_data
+        request.api_key      = key
+
+        # Record usage async — non-blocking
+        endpoint = request.endpoint or ""
+        _record_usage_async(key, endpoint)
+
+        # Add rate limit info to response headers
+        resp = f(*args, **kwargs)
+        if hasattr(resp, "headers"):
+            resp.headers["X-RateLimit-Limit"]     = str(cap)
+            resp.headers["X-RateLimit-Remaining"] = str(max(0, cap - count))
+            resp.headers["X-API-Key-Name"]        = key_data.get("name","")
+            resp.headers["X-API-Key-Tier"]        = key_data.get("tier","standard")
+        return resp
     return decorated
 
 
@@ -4578,6 +4705,157 @@ def v1_root():
         },
         "generated": datetime.now(timezone.utc).isoformat(),
     })
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# API KEY ADMIN ROUTES — protected by internal dashboard auth (ACCESS_CODE)
+# These are for the dashboard admin panel, NOT the public API
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _generate_api_key(prefix: str = "cnx") -> str:
+    """Generate a secure random API key: cnx_<32 hex chars>"""
+    return f"{prefix}_{secrets.token_hex(16)}"
+
+
+@app.route("/admin/keys", methods=["GET"])
+@require_auth
+def admin_list_keys():
+    """List all API keys (dashboard admin only)."""
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/api_keys?select=key,name,owner,tier,rate_limit_per_hour,is_active,created_at,expires_at,last_used_at,total_requests,notes&order=created_at.desc",
+            headers=supa_headers(), timeout=10)
+        if r.status_code == 200:
+            keys = r.json()
+            # Mask key — show only first 8 + last 4 chars for security
+            for k in keys:
+                raw = k.get("key","")
+                if len(raw) > 12:
+                    k["key_masked"] = raw[:8] + "..." + raw[-4:]
+                else:
+                    k["key_masked"] = raw[:4] + "..."
+                k["is_internal"] = (raw == ACCESS_CODE)
+            return jsonify({"success": True, "keys": keys, "total": len(keys)})
+        return jsonify({"success": False, "error": f"Supabase {r.status_code}"}), 500
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/admin/keys", methods=["POST"])
+@require_auth
+def admin_create_key():
+    """
+    Create a new API key.
+    Body: {name, owner, tier, rate_limit_per_hour, expires_days, notes}
+    """
+    try:
+        body = request.json or {}
+        name  = (body.get("name","") or "").strip()
+        if not name:
+            return jsonify({"success": False, "error": "name is required"}), 400
+
+        new_key     = _generate_api_key()
+        tier        = body.get("tier","standard")
+        rate_limit  = int(body.get("rate_limit_per_hour", 100))
+        expires_days= int(body.get("expires_days", 0))
+        expires_at  = None
+        if expires_days > 0:
+            expires_at = (datetime.now(timezone.utc) + timedelta(days=expires_days)).isoformat()
+
+        row = {
+            "key":                 new_key,
+            "name":                name,
+            "owner":               body.get("owner","").strip(),
+            "tier":                tier,
+            "rate_limit_per_hour": rate_limit,
+            "is_active":           True,
+            "expires_at":          expires_at,
+            "notes":               body.get("notes","").strip(),
+            "total_requests":      0,
+        }
+        r = requests.post(
+            f"{SUPABASE_URL}/rest/v1/api_keys",
+            headers={**supa_headers(), "Prefer": "return=representation"},
+            json=row, timeout=10)
+        if r.status_code in (200, 201):
+            log.info(f"[API-KEY] Created key '{name}' tier={tier} limit={rate_limit}/h")
+            return jsonify({
+                "success":  True,
+                "key":      new_key,   # full key shown ONCE at creation only
+                "name":     name,
+                "tier":     tier,
+                "rate_limit_per_hour": rate_limit,
+                "expires_at": expires_at,
+                "message":  "Save this key securely — it will not be shown again."
+            }), 201
+        return jsonify({"success": False, "error": f"Supabase {r.status_code}: {r.text[:200]}"}), 500
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/admin/keys/<path:key_id>/revoke", methods=["POST"])
+@require_auth
+def admin_revoke_key(key_id):
+    """Revoke (deactivate) an API key. Does not delete — keeps audit trail."""
+    try:
+        r = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/api_keys?key=eq.{key_id}",
+            headers={**supa_headers(), "Prefer": "return=minimal"},
+            json={"is_active": False}, timeout=10)
+        # Evict from cache immediately
+        _key_cache.pop(key_id, None)
+        _key_cache_ts.pop(key_id, None)
+        log.info(f"[API-KEY] Revoked key: {key_id[:8]}...")
+        return jsonify({"success": True, "message": "Key revoked."})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/admin/keys/<path:key_id>/activate", methods=["POST"])
+@require_auth
+def admin_activate_key(key_id):
+    """Re-activate a previously revoked key."""
+    try:
+        r = requests.patch(
+            f"{SUPABASE_URL}/rest/v1/api_keys?key=eq.{key_id}",
+            headers={**supa_headers(), "Prefer": "return=minimal"},
+            json={"is_active": True}, timeout=10)
+        _key_cache.pop(key_id, None)  # force cache refresh on next use
+        return jsonify({"success": True, "message": "Key activated."})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/admin/keys/usage", methods=["GET"])
+@require_auth
+def admin_key_usage():
+    """Return current in-memory rate limit usage for all active keys."""
+    try:
+        now = time.time()
+        window_start = now - (now % 3600)
+        usage = []
+        with _rate_lock:
+            for k, entry in _rate_counters.items():
+                if entry.get("window_start", 0) >= window_start:
+                    key_data = _key_cache.get(k) or {}
+                    usage.append({
+                        "key_masked": k[:8] + "..." + k[-4:] if len(k) > 12 else k[:4] + "...",
+                        "name":       key_data.get("name","unknown"),
+                        "tier":       key_data.get("tier",""),
+                        "requests_this_hour": entry["count"],
+                        "limit":      key_data.get("rate_limit_per_hour", 100),
+                        "pct_used":   round(entry["count"] / max(key_data.get("rate_limit_per_hour",100),1) * 100, 1),
+                    })
+        usage.sort(key=lambda x: x["requests_this_hour"], reverse=True)
+        return jsonify({
+            "success":        True,
+            "window_resets_in": f"{int(3600 - (now % 3600))}s",
+            "active_keys_in_use": len(usage),
+            "usage":          usage,
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 scheduler = BackgroundScheduler(timezone="UTC")
 # ── Email schedule (IST) ────────────────────────────────────────────────────
