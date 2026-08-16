@@ -162,8 +162,8 @@ def supa_load_archived(limit:int=200, offset:int=0, severity:str="",
     if not (SUPABASE_URL and SUPABASE_KEY): return []
     try:
         now_dt     = datetime.now(timezone.utc)
-        cutoff_old = (now_dt - timedelta(days=days_back)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        cutoff_arc = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cutoff_old = (now_dt - timedelta(days=days_back)).isoformat()
+        cutoff_arc = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).isoformat()
         results    = {}
 
         # Query A: explicitly archived rows within retention window
@@ -202,7 +202,7 @@ def supa_load_archived(limit:int=200, offset:int=0, severity:str="",
 def supa_get_sla_audit(days:int=365) -> list:
     if not (SUPABASE_URL and SUPABASE_KEY): return []
     try:
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         r = requests.get(
             f"{SUPABASE_URL}/rest/v1/sla_audit_log?order=breached_at.desc&limit=500&breached_at=gte.{cutoff}",
             headers=supa_headers(), timeout=10)
@@ -254,10 +254,10 @@ def supa_save_archived():
     try:
         now_dt   = datetime.now(timezone.utc)
         now_iso  = now_dt.isoformat()
-        arch_cut = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        hard_cut = (now_dt - timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        kev_cut  = (now_dt - timedelta(days=730)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        met_cut  = (now_dt - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        arch_cut = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).isoformat()
+        hard_cut = (now_dt - timedelta(days=365)).isoformat()
+        kev_cut  = (now_dt - timedelta(days=730)).isoformat()
+        met_cut  = (now_dt - timedelta(days=90)).isoformat()
 
         # Count active rows before
         before_r = requests.get(
@@ -463,7 +463,7 @@ def supa_save_advisory_cache(advisories:list) -> bool:
             ("KEV",      CACHE_RETENTION_DAYS["kev"]),
             ("ZeroDay",  CACHE_RETENTION_DAYS["zeroday"]),
         ]:
-            cutoff = (now_dt - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            cutoff = (now_dt - timedelta(days=days)).isoformat()
             if retention_type == "KEV":
                 requests.delete(
                     f"{SUPABASE_URL}/rest/v1/advisory_cache?is_kev=eq.true&published=lt.{cutoff}",
@@ -474,14 +474,14 @@ def supa_save_advisory_cache(advisories:list) -> bool:
                     headers=supa_headers(), timeout=10)
 
         # Archive non-KEV rows older than ARCHIVE_AFTER_DAYS (use fetched_at, not published)
-        archive_cutoff = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        archive_cutoff = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).isoformat()
         requests.patch(
             f"{SUPABASE_URL}/rest/v1/advisory_cache"
             f"?is_archived=eq.false&is_kev=eq.false&is_zero_day=eq.false&fetched_at=lt.{archive_cutoff}",
             headers={**supa_headers(),"Prefer":"return=minimal"},
             json={"is_archived":True,"archived_at":now}, timeout=10)
         # Hard-delete rows older than 365d (use fetched_at, not published)
-        hard_cutoff = (now_dt - timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        hard_cutoff = (now_dt - timedelta(days=365)).isoformat()
         requests.delete(
             f"{SUPABASE_URL}/rest/v1/advisory_cache"
             f"?is_kev=eq.false&is_zero_day=eq.false&fetched_at=lt.{hard_cutoff}",
@@ -559,7 +559,7 @@ def supa_set_source_config(source_id:str, enabled:bool, updated_by:str) -> bool:
 def supa_purge_old_acks():
     if not (SUPABASE_URL and SUPABASE_KEY): return
     try:
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=365)).isoformat()
         requests.delete(f"{SUPABASE_URL}/rest/v1/acknowledgments?acknowledged_at=lt.{cutoff}", headers=supa_headers(), timeout=10)
         log.info("[SUPABASE] Old acks purged")
     except Exception as e: log.error(f"[SUPABASE] purge_acks: {e}")
@@ -4041,6 +4041,528 @@ def fetch_now():
         "in_progress": _fetch_in_progress.is_set()
     }), 202
 
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 1 — PUBLIC API (v1) + MCP TOOL INTERFACE
+# ══════════════════════════════════════════════════════════════════════════════
+# Auth: X-API-Key header (uses same ACCESS_CODE for now — Phase 2 adds per-key DB)
+# All routes versioned under /v1/ — safe to evolve without breaking consumers
+# MCP endpoints allow AI interfaces to discover and call tools natively
+# ──────────────────────────────────────────────────────────────────────────────
+
+def require_api_key(f):
+    """
+    Phase 1 API auth — accepts either:
+      - X-API-Key: <ACCESS_CODE>        (header, preferred)
+      - ?api_key=<ACCESS_CODE>          (query param, for quick testing)
+    Phase 2 will replace this with per-key Supabase lookup + rate limiting.
+    """
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        key = (request.headers.get("X-API-Key","") or
+               request.args.get("api_key",""))
+        if not key or key != ACCESS_CODE:
+            return jsonify({
+                "error":   "Unauthorized",
+                "message": "Provide a valid API key via X-API-Key header or ?api_key= param",
+                "docs":    "https://ssipankajsingh.github.io/security-advisory-dashboard/api-docs"
+            }), 401
+        return f(*args, **kwargs)
+    return decorated
+
+
+def _apply_advisory_filters(items: list, args) -> list:
+    """Shared filter logic for /v1/advisories and /mcp/execute."""
+    severity = args.get("severity","").strip()
+    vendor   = args.get("vendor","").strip().lower()
+    cve_id   = args.get("cve_id","").strip().upper()
+    kev_only = args.get("kev","").lower() in ("true","1","yes")
+    zd_only  = args.get("zero_day","").lower() in ("true","1","yes")
+    cnx_only = args.get("cnx_match","").lower() in ("true","1","yes")
+    days     = int(args.get("days", 0))
+    q        = args.get("q","").strip().lower()  # free-text search
+
+    if severity:  items = [a for a in items if (a.get("severity","") or "").lower() == severity.lower()]
+    if vendor:    items = [a for a in items if vendor in (a.get("vendor","") or a.get("source","")).lower()]
+    if cve_id:    items = [a for a in items if cve_id in (a.get("cve","") or a.get("id","")).upper()]
+    if kev_only:  items = [a for a in items if a.get("isKEV")]
+    if zd_only:   items = [a for a in items if a.get("zeroDay")]
+    if cnx_only:  items = [a for a in items if a.get("cnxMatch")]
+    if days:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        items  = [a for a in items if (a.get("published") or "") >= cutoff[:10]]
+    if q:
+        items = [a for a in items if q in (
+            (a.get("title","") or "") + " " +
+            (a.get("cve","") or "") + " " +
+            (a.get("vendor","") or "") + " " +
+            (a.get("summary","") or "")
+        ).lower()]
+    return items
+
+
+def _build_advisory_response(items: list, source: str, filters: dict, limit: int) -> dict:
+    """Standard v1 advisory response envelope."""
+    total_before_limit = len(items)
+    items = items[:limit]
+    return {
+        "api_version":  "v1",
+        "source":       source,
+        "generated":    datetime.now(timezone.utc).isoformat(),
+        "filters":      {k: v for k, v in filters.items() if v},
+        "total":        total_before_limit,
+        "returned":     len(items),
+        "limit":        limit,
+        "advisories":   items,
+    }
+
+
+# ── /v1/advisories ────────────────────────────────────────────────────────────
+@app.route("/v1/advisories", methods=["GET"])
+@require_api_key
+def v1_advisories():
+    """
+    Fetch security advisories with optional filters.
+
+    Query params:
+      severity   = Critical | High | Medium | Low
+      vendor     = cisco | fortinet | microsoft | ... (partial match)
+      cve_id     = CVE-2026-12345
+      kev        = true   → KEV-only
+      zero_day   = true   → Zero-day only
+      cnx_match  = true   → CNX Stack matches only
+      days       = 30     → published in last N days
+      q          = text   → free-text search across title/summary/CVE
+      limit      = 50     → max results (cap 500)
+      format     = json | summary  (summary = condensed, no full details)
+
+    Auth: X-API-Key header
+    """
+    try:
+        limit  = min(int(request.args.get("limit", 50)), 500)
+        fmt    = request.args.get("format","json")
+        items  = supa_load_advisory_cache()
+        items  = _apply_advisory_filters(items, request.args)
+        filters = {
+            "severity":  request.args.get("severity",""),
+            "vendor":    request.args.get("vendor",""),
+            "cve_id":    request.args.get("cve_id",""),
+            "kev":       request.args.get("kev",""),
+            "zero_day":  request.args.get("zero_day",""),
+            "cnx_match": request.args.get("cnx_match",""),
+            "days":      request.args.get("days",""),
+            "q":         request.args.get("q",""),
+        }
+        if fmt == "summary":
+            items = [{
+                "id":       a.get("id",""), "cve": a.get("cve",""),
+                "title":    (a.get("title","") or "")[:120],
+                "severity": a.get("severity",""), "cvss": a.get("cvss",""),
+                "epss":     a.get("epss",""), "vendor": a.get("vendor",""),
+                "published":a.get("published",""), "isKEV": a.get("isKEV",False),
+                "zeroDay":  a.get("zeroDay",False), "cnxMatch": a.get("cnxMatch",""),
+                "link":     a.get("link","") or a.get("url",""),
+            } for a in items]
+        return jsonify(_build_advisory_response(items, "cache", filters, limit))
+    except Exception as e:
+        log.error(f"[v1/advisories] {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ── /v1/advisories/<cve_id> ───────────────────────────────────────────────────
+@app.route("/v1/advisories/<cve_id>", methods=["GET"])
+@require_api_key
+def v1_advisory_detail(cve_id):
+    """
+    Get full details for a single CVE/advisory ID.
+    Returns 404 if not found in active cache.
+    """
+    try:
+        cve_id = cve_id.upper().strip()
+        items  = supa_load_advisory_cache()
+        match  = next((a for a in items if
+                       (a.get("cve","") or "").upper() == cve_id or
+                       (a.get("id","") or "").upper() == cve_id), None)
+        if not match:
+            return jsonify({
+                "api_version": "v1",
+                "found": False,
+                "cve_id": cve_id,
+                "message": "Advisory not found in active cache. Try /v1/archive for older advisories."
+            }), 404
+        return jsonify({"api_version":"v1","found":True,"advisory":match,
+                        "generated":datetime.now(timezone.utc).isoformat()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── /v1/kev ───────────────────────────────────────────────────────────────────
+@app.route("/v1/kev", methods=["GET"])
+@require_api_key
+def v1_kev():
+    """
+    Return CISA Known Exploited Vulnerabilities only.
+    Params: limit (default 100, max 500), days (filter by published date)
+    """
+    try:
+        limit = min(int(request.args.get("limit",100)), 500)
+        items = supa_load_advisory_cache()
+        kev   = [a for a in items if a.get("isKEV")]
+        if request.args.get("days"):
+            kev = _apply_advisory_filters(kev, request.args)
+        return jsonify({
+            "api_version": "v1",
+            "generated":   datetime.now(timezone.utc).isoformat(),
+            "total":       len(kev),
+            "returned":    min(len(kev), limit),
+            "advisories":  kev[:limit],
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── /v1/stats ─────────────────────────────────────────────────────────────────
+@app.route("/v1/stats", methods=["GET"])
+@require_api_key
+def v1_stats():
+    """
+    Aggregate statistics — useful for dashboards and AI context summaries.
+    Returns counts by severity, vendor, KEV, zero-day, CNX match.
+    """
+    try:
+        items = supa_load_advisory_cache()
+        from collections import Counter
+        vendor_counts = Counter(
+            (a.get("vendor","") or a.get("source","unknown")).lower()
+            for a in items
+        )
+        return jsonify({
+            "api_version":    "v1",
+            "generated":      datetime.now(timezone.utc).isoformat(),
+            "total":          len(items),
+            "by_severity": {
+                "critical": sum(1 for a in items if a.get("severity") == "Critical"),
+                "high":     sum(1 for a in items if a.get("severity") == "High"),
+                "medium":   sum(1 for a in items if a.get("severity") == "Medium"),
+                "low":      sum(1 for a in items if a.get("severity") == "Low"),
+            },
+            "kev_count":      sum(1 for a in items if a.get("isKEV")),
+            "zero_day_count": sum(1 for a in items if a.get("zeroDay")),
+            "cnx_match_count":sum(1 for a in items if a.get("cnxMatch")),
+            "patch_available":sum(1 for a in items if a.get("patch_status") == "available"),
+            "top_vendors":    dict(vendor_counts.most_common(10)),
+            "feed_count":     SOURCE_COUNT,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── /v1/feeds ─────────────────────────────────────────────────────────────────
+@app.route("/v1/feeds", methods=["GET"])
+@require_api_key
+def v1_feeds():
+    """Feed health and source inventory."""
+    try:
+        disabled = {k for k, v in _feed_disabled.items() if v > time.time()}
+        failing  = {k: v for k, v in _feed_failures.items() if v > 0}
+        return jsonify({
+            "api_version":   "v1",
+            "generated":     datetime.now(timezone.utc).isoformat(),
+            "total_sources": SOURCE_COUNT,
+            "active":        SOURCE_COUNT - len(disabled),
+            "disabled":      list(disabled),
+            "failing":       failing,
+            "sources":       list(TRUSTED_FEEDS.keys()),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── /v1/search ────────────────────────────────────────────────────────────────
+@app.route("/v1/search", methods=["GET"])
+@require_api_key
+def v1_search():
+    """
+    Unified search across active + archived advisories.
+    Params: q (required), severity, limit, include_archive (default false)
+    """
+    try:
+        q = request.args.get("q","").strip()
+        if not q:
+            return jsonify({"error": "q parameter required"}), 400
+        limit = min(int(request.args.get("limit", 50)), 200)
+        items = supa_load_advisory_cache()
+        items = _apply_advisory_filters(items, request.args)
+        # Optionally include archive
+        if request.args.get("include_archive","").lower() in ("true","1"):
+            archived = supa_load_archived(limit=200, days_back=365)
+            archived = _apply_advisory_filters(archived, request.args)
+            # Merge, dedupe by id
+            seen = {a.get("id") for a in items}
+            items += [a for a in archived if a.get("id") not in seen]
+        return jsonify({
+            "api_version": "v1",
+            "query":       q,
+            "total":       len(items),
+            "returned":    min(len(items), limit),
+            "advisories":  items[:limit],
+            "generated":   datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MCP TOOL INTERFACE — AI-native integration
+# Follows MCP (Model Context Protocol) spec for tool discovery + execution
+# Your AI interface calls /mcp/tools to discover capabilities, then
+# /mcp/execute to run them with natural-language-parsed parameters
+# ══════════════════════════════════════════════════════════════════════════════
+
+MCP_TOOL_DEFS = [
+    {
+        "name":        "get_advisories",
+        "description": "Fetch security advisories from the Concentrix GSE/SOC platform. Filter by severity, vendor, CVE ID, KEV status, zero-day, or free text. Use this to answer questions like 'what critical vulnerabilities exist this week' or 'show me Cisco advisories'.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "severity":  {"type":"string","enum":["Critical","High","Medium","Low"],"description":"Filter by severity level"},
+                "vendor":    {"type":"string","description":"Filter by vendor name e.g. cisco, fortinet, microsoft"},
+                "cve_id":    {"type":"string","description":"Specific CVE ID e.g. CVE-2026-12345"},
+                "kev":       {"type":"boolean","description":"If true, return only CISA Known Exploited Vulnerabilities"},
+                "zero_day":  {"type":"boolean","description":"If true, return only zero-day vulnerabilities"},
+                "cnx_match": {"type":"boolean","description":"If true, return only advisories matching Concentrix asset inventory"},
+                "days":      {"type":"integer","description":"Return advisories published in last N days"},
+                "q":         {"type":"string","description":"Free-text search across title, CVE ID, vendor, summary"},
+                "limit":     {"type":"integer","description":"Max results to return (default 20, max 100)","default":20},
+                "format":    {"type":"string","enum":["json","summary"],"description":"summary returns condensed fields for AI context efficiency"},
+            }
+        }
+    },
+    {
+        "name":        "get_advisory_detail",
+        "description": "Get full details for a specific CVE or advisory ID including CVSS score, EPSS probability, patch status, KEV due date, and affected assets.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["cve_id"],
+            "properties": {
+                "cve_id": {"type":"string","description":"CVE ID e.g. CVE-2026-12345"}
+            }
+        }
+    },
+    {
+        "name":        "get_kev_list",
+        "description": "Return the current CISA Known Exploited Vulnerabilities (KEV) that affect your environment. These require immediate attention and have CISA-mandated remediation deadlines.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "days":  {"type":"integer","description":"Filter to KEV entries added in last N days"},
+                "limit": {"type":"integer","description":"Max results (default 50)","default":50}
+            }
+        }
+    },
+    {
+        "name":        "get_stats",
+        "description": "Get aggregate statistics about the current advisory landscape: counts by severity, vendor breakdown, KEV count, zero-day count, CNX Stack match count. Use for executive summaries or briefings.",
+        "inputSchema": {"type":"object","properties":{}}
+    },
+    {
+        "name":        "get_cnx_matches",
+        "description": "Get all advisories that match Concentrix-deployed assets across Network, Server, Endpoint, and Application tiers. These are the highest-priority advisories for the SOC team.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tier":     {"type":"string","enum":["network","server","endpoint","app"],"description":"Filter by asset tier"},
+                "severity": {"type":"string","enum":["Critical","High","Medium","Low"]},
+                "limit":    {"type":"integer","default":50}
+            }
+        }
+    },
+    {
+        "name":        "search_advisories",
+        "description": "Full-text search across active and optionally archived advisories. Use when looking for a specific vulnerability by name, technology, or keyword.",
+        "inputSchema": {
+            "type": "object",
+            "required": ["q"],
+            "properties": {
+                "q":               {"type":"string","description":"Search query"},
+                "include_archive": {"type":"boolean","description":"Also search historical archive (default false)"},
+                "severity":        {"type":"string","enum":["Critical","High","Medium","Low"]},
+                "limit":           {"type":"integer","default":20}
+            }
+        }
+    },
+    {
+        "name":        "get_feed_health",
+        "description": "Check the health of all security advisory data sources. Returns active/disabled/failing feeds.",
+        "inputSchema": {"type":"object","properties":{}}
+    },
+]
+
+
+@app.route("/mcp/tools", methods=["GET"])
+@require_api_key
+def mcp_tools():
+    """MCP tool discovery endpoint — returns all available tools with schemas."""
+    return jsonify({
+        "tools":      MCP_TOOL_DEFS,
+        "server":     "Concentrix GSE/SOC Security Advisory Platform",
+        "version":    "v1",
+        "generated":  datetime.now(timezone.utc).isoformat(),
+    })
+
+
+@app.route("/mcp/execute", methods=["POST"])
+@require_api_key
+def mcp_execute():
+    """
+    MCP tool execution endpoint.
+    Body: {"tool": "get_advisories", "input": {"severity": "Critical", "limit": 10}}
+    Returns tool result in standard MCP content block format.
+    """
+    try:
+        body  = request.json or {}
+        tool  = body.get("tool","").strip()
+        inp   = body.get("input", {})
+
+        if not tool:
+            return jsonify({"error": "tool name required"}), 400
+
+        valid_tools = {t["name"] for t in MCP_TOOL_DEFS}
+        if tool not in valid_tools:
+            return jsonify({"error": f"Unknown tool: {tool}", "available": list(valid_tools)}), 400
+
+        log.info(f"[MCP] Tool: {tool} | Input: {inp}")
+
+        # ── Route to handler ──────────────────────────────────────────────
+        if tool == "get_advisories":
+            limit = min(int(inp.get("limit", 20)), 100)
+            items = supa_load_advisory_cache()
+            # Convert bool inputs (MCP sends actual booleans)
+            class _Args:
+                def get(self, k, d=""):
+                    v = inp.get(k, d)
+                    if isinstance(v, bool): return "true" if v else ""
+                    return str(v) if v else d
+            items = _apply_advisory_filters(items, _Args())
+            fmt = inp.get("format","json")
+            if fmt == "summary":
+                items = [{"id":a.get("id"),"cve":a.get("cve"),"title":(a.get("title","") or "")[:120],
+                          "severity":a.get("severity"),"cvss":a.get("cvss"),"epss":a.get("epss"),
+                          "vendor":a.get("vendor"),"published":a.get("published"),
+                          "isKEV":a.get("isKEV",False),"zeroDay":a.get("zeroDay",False),
+                          "cnxMatch":a.get("cnxMatch",""),"link":a.get("link","")} for a in items]
+            result = {"total": len(items), "returned": min(len(items),limit), "advisories": items[:limit]}
+
+        elif tool == "get_advisory_detail":
+            cve_id = (inp.get("cve_id","") or "").upper()
+            items  = supa_load_advisory_cache()
+            match  = next((a for a in items if
+                           (a.get("cve","") or "").upper() == cve_id or
+                           (a.get("id","") or "").upper() == cve_id), None)
+            result = {"found": bool(match), "advisory": match} if match else {"found": False, "cve_id": cve_id}
+
+        elif tool == "get_kev_list":
+            limit = min(int(inp.get("limit",50)), 500)
+            items = supa_load_advisory_cache()
+            kev   = [a for a in items if a.get("isKEV")]
+            result = {"total": len(kev), "returned": min(len(kev),limit), "advisories": kev[:limit]}
+
+        elif tool == "get_stats":
+            from collections import Counter
+            items  = supa_load_advisory_cache()
+            vc     = Counter((a.get("vendor","") or a.get("source","unknown")).lower() for a in items)
+            result = {
+                "total": len(items),
+                "by_severity": {
+                    "critical": sum(1 for a in items if a.get("severity")=="Critical"),
+                    "high":     sum(1 for a in items if a.get("severity")=="High"),
+                    "medium":   sum(1 for a in items if a.get("severity")=="Medium"),
+                    "low":      sum(1 for a in items if a.get("severity")=="Low"),
+                },
+                "kev_count":       sum(1 for a in items if a.get("isKEV")),
+                "zero_day_count":  sum(1 for a in items if a.get("zeroDay")),
+                "cnx_match_count": sum(1 for a in items if a.get("cnxMatch")),
+                "patch_available": sum(1 for a in items if a.get("patch_status")=="available"),
+                "top_vendors":     dict(vc.most_common(10)),
+            }
+
+        elif tool == "get_cnx_matches":
+            limit    = min(int(inp.get("limit",50)),500)
+            tier_f   = (inp.get("tier","") or "").lower()
+            sev_f    = inp.get("severity","")
+            items    = supa_load_advisory_cache()
+            matched  = [a for a in items if a.get("cnxMatch")]
+            if tier_f: matched = [a for a in matched if tier_f in (a.get("cnxMatch","") or "").lower()]
+            if sev_f:  matched = [a for a in matched if a.get("severity","").lower() == sev_f.lower()]
+            result   = {"total": len(matched), "returned": min(len(matched),limit), "advisories": matched[:limit]}
+
+        elif tool == "search_advisories":
+            q       = inp.get("q","").strip()
+            limit   = min(int(inp.get("limit",20)), 200)
+            inc_arc = inp.get("include_archive", False)
+            class _Args2:
+                def get(self, k, d=""):
+                    if k == "q": return q
+                    if k == "severity": return inp.get("severity","")
+                    if k == "days": return ""
+                    return d
+            items  = supa_load_advisory_cache()
+            items  = _apply_advisory_filters(items, _Args2())
+            if inc_arc:
+                archived = supa_load_archived(limit=200, days_back=365)
+                archived = _apply_advisory_filters(archived, _Args2())
+                seen = {a.get("id") for a in items}
+                items += [a for a in archived if a.get("id") not in seen]
+            result = {"query": q, "total": len(items), "returned": min(len(items),limit), "advisories": items[:limit]}
+
+        elif tool == "get_feed_health":
+            disabled = {k for k, v in _feed_disabled.items() if v > time.time()}
+            result   = {
+                "total_sources": SOURCE_COUNT,
+                "active":        SOURCE_COUNT - len(disabled),
+                "disabled":      list(disabled),
+                "failing":       {k: v for k, v in _feed_failures.items() if v > 0},
+            }
+        else:
+            return jsonify({"error": f"Handler not implemented for: {tool}"}), 501
+
+        # Standard MCP content block response
+        return jsonify({
+            "tool":      tool,
+            "content":   [{"type": "text", "text": json.dumps(result)}],
+            "result":    result,
+            "generated": datetime.now(timezone.utc).isoformat(),
+        })
+
+    except Exception as e:
+        log.error(f"[MCP] Execute error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ── /v1/ root — API discovery ─────────────────────────────────────────────────
+@app.route("/v1/", methods=["GET"])
+@app.route("/v1", methods=["GET"])
+def v1_root():
+    """API root — no auth required. Returns endpoint catalog for discovery."""
+    return jsonify({
+        "api":      "Concentrix GSE/SOC Security Advisory Platform",
+        "version":  "v1",
+        "base_url": "https://security-advisory-proxy.onrender.com",
+        "auth":     "X-API-Key header required for all endpoints except this one",
+        "endpoints": {
+            "GET  /v1/advisories":        "Filtered advisory feed (params: severity, vendor, cve_id, kev, zero_day, cnx_match, days, q, limit, format)",
+            "GET  /v1/advisories/<id>":   "Single advisory by CVE ID",
+            "GET  /v1/kev":               "CISA KEV list only",
+            "GET  /v1/stats":             "Aggregate counts by severity/vendor/KEV",
+            "GET  /v1/feeds":             "Feed health and source inventory",
+            "GET  /v1/search":            "Full-text search (params: q, include_archive, severity, limit)",
+            "GET  /mcp/tools":            "MCP tool definitions for AI integration",
+            "POST /mcp/execute":          "MCP tool execution endpoint",
+        },
+        "generated": datetime.now(timezone.utc).isoformat(),
+    })
 
 scheduler = BackgroundScheduler(timezone="UTC")
 # ── Email schedule (IST) ────────────────────────────────────────────────────
