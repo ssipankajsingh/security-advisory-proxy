@@ -31,6 +31,7 @@ CORS(app, origins=[
 # ─── ENV ──────────────────────────────────────────────────────────────────────
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY","")
 ACCESS_CODE      = os.getenv("ACCESS_CODE","")
+ADMIN_PIN        = os.getenv("ADMIN_PIN","")   # Required for /admin/* routes — set on Render
 TEAMS_WEBHOOK    = os.getenv("TEAMS_WEBHOOK","")
 DIGEST_EMAIL     = os.getenv("DIGEST_EMAIL","")
 PORT             = int(os.getenv("PORT",3001))
@@ -4201,6 +4202,32 @@ def require_api_key(f):
     return decorated
 
 
+def require_admin(f):
+    """
+    Admin-only protection for /admin/* routes.
+    Requires BOTH the normal ACCESS_CODE (via require_auth) AND
+    the ADMIN_PIN via X-Admin-Pin header or ?admin_pin= query param.
+    Returns 403 if ADMIN_PIN env var is not set (fail-secure).
+    """
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not ADMIN_PIN:
+            return jsonify({
+                "error":   "Admin access disabled",
+                "message": "ADMIN_PIN environment variable is not configured on server."
+            }), 403
+        pin = (request.headers.get("X-Admin-Pin","") or
+               request.args.get("admin_pin","") or
+               (request.json or {}).get("admin_pin",""))
+        if not pin or pin != ADMIN_PIN:
+            return jsonify({
+                "error":   "Admin PIN required",
+                "message": "Provide your admin PIN via X-Admin-Pin header."
+            }), 403
+        return f(*args, **kwargs)
+    return decorated
+
+
 def _apply_advisory_filters(items: list, args) -> list:
     """Shared filter logic for /v1/advisories and /mcp/execute."""
     severity = args.get("severity","").strip()
@@ -4720,6 +4747,7 @@ def _generate_api_key(prefix: str = "cnx") -> str:
 
 @app.route("/admin/keys", methods=["GET"])
 @require_auth
+@require_admin
 def admin_list_keys():
     """List all API keys (dashboard admin only)."""
     try:
@@ -4744,6 +4772,7 @@ def admin_list_keys():
 
 @app.route("/admin/keys", methods=["POST"])
 @require_auth
+@require_admin
 def admin_create_key():
     """
     Create a new API key.
@@ -4796,6 +4825,7 @@ def admin_create_key():
 
 @app.route("/admin/keys/<path:key_id>/revoke", methods=["POST"])
 @require_auth
+@require_admin
 def admin_revoke_key(key_id):
     """Revoke (deactivate) an API key. Does not delete — keeps audit trail."""
     try:
@@ -4814,6 +4844,7 @@ def admin_revoke_key(key_id):
 
 @app.route("/admin/keys/<path:key_id>/activate", methods=["POST"])
 @require_auth
+@require_admin
 def admin_activate_key(key_id):
     """Re-activate a previously revoked key."""
     try:
@@ -4829,6 +4860,7 @@ def admin_activate_key(key_id):
 
 @app.route("/admin/keys/usage", methods=["GET"])
 @require_auth
+@require_admin
 def admin_key_usage():
     """Return current in-memory rate limit usage for all active keys."""
     try:
