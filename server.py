@@ -2622,9 +2622,11 @@ def fetch_all_advisories() -> list:
 def require_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        _body = request.get_json(silent=True) or {}
         token = (request.headers.get("x-access-code")
-                 or (request.json or {}).get("accessCode")
-                 or (request.json or {}).get("code"))
+                 or request.args.get("access_code","")
+                 or _body.get("accessCode")
+                 or _body.get("code"))
         if not ACCESS_CODE or token == ACCESS_CODE: return f(*args, **kwargs)
         return jsonify({"error":"Unauthorized"}), 401
     return decorated
