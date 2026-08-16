@@ -4218,7 +4218,7 @@ def require_admin(f):
             }), 403
         pin = (request.headers.get("X-Admin-Pin","") or
                request.args.get("admin_pin","") or
-               (request.json or {}).get("admin_pin",""))
+               (request.get_json(silent=True) or {}).get("admin_pin",""))
         if not pin or pin != ADMIN_PIN:
             return jsonify({
                 "error":   "Admin PIN required",
