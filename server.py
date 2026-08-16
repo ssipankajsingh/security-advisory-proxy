@@ -372,8 +372,10 @@ CACHE_RETENTION_DAYS = {
     "high":     180,  # High — 6 months
     "default":   90,  # Medium/Low/Unknown — 90 days (was 365, caused table bloat)
 }
-ARCHIVE_AFTER_DAYS  = 60    # Flag rows as archived after 60d
-ACTIVE_ROW_HARD_CAP = 18000  # Safety valve: force-archive oldest if active rows > this
+ARCHIVE_AFTER_DAYS  = 14    # Archive non-KEV/non-ZeroDay rows after 14 days
+                            # (all fetched_at timestamps are post-July 2026 after bug fix;
+                            #  revisit in Sep 2026 when natural 60d history builds up)
+ACTIVE_ROW_HARD_CAP = 10000  # Safety valve: tighter cap to match 14d window
 
 def supa_save_advisory_cache(advisories:list) -> bool:
     if not (SUPABASE_URL and SUPABASE_KEY): return False
@@ -4086,9 +4088,9 @@ def _apply_advisory_filters(items: list, args) -> list:
     if severity:  items = [a for a in items if (a.get("severity","") or "").lower() == severity.lower()]
     if vendor:    items = [a for a in items if vendor in (a.get("vendor","") or a.get("source","")).lower()]
     if cve_id:    items = [a for a in items if cve_id in (a.get("cve","") or a.get("id","")).upper()]
-    if kev_only:  items = [a for a in items if a.get("isKEV")]
+    if kev_only:  items = [a for a in items if a.get("isKev") or a.get("source","") in ("cisa_kev","vulncheck_kev","CISA KEV")]
     if zd_only:   items = [a for a in items if a.get("zeroDay")]
-    if cnx_only:  items = [a for a in items if a.get("cnxMatch")]
+    if cnx_only:  items = [a for a in items if a.get("cnxStack")]
     if days:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         items  = [a for a in items if (a.get("published") or "") >= cutoff[:10]]
@@ -4161,7 +4163,7 @@ def v1_advisories():
                 "severity": a.get("severity",""), "cvss": a.get("cvss",""),
                 "epss":     a.get("epss",""), "vendor": a.get("vendor",""),
                 "published":a.get("published",""), "isKEV": a.get("isKEV",False),
-                "zeroDay":  a.get("zeroDay",False), "cnxMatch": a.get("cnxMatch",""),
+                "zeroDay":  a.get("zeroDay",False), "cnxMatch": a.get("cnxStack",""), "cnxTier": a.get("cnxTier",""),
                 "link":     a.get("link","") or a.get("url",""),
             } for a in items]
         return jsonify(_build_advisory_response(items, "cache", filters, limit))
@@ -4208,7 +4210,7 @@ def v1_kev():
     try:
         limit = min(int(request.args.get("limit",100)), 500)
         items = supa_load_advisory_cache()
-        kev   = [a for a in items if a.get("isKEV")]
+        kev   = [a for a in items if a.get("isKev") or a.get("source","") in ("cisa_kev","vulncheck_kev","CISA KEV")]
         if request.args.get("days"):
             kev = _apply_advisory_filters(kev, request.args)
         return jsonify({
@@ -4237,22 +4239,32 @@ def v1_stats():
             (a.get("vendor","") or a.get("source","unknown")).lower()
             for a in items
         )
+        # Exclude news/intel items from vendor stats (they skew counts)
+        advisories_only = [a for a in items if not a.get("isNews")]
+        vc_filtered = Counter(
+            (a.get("vendor","") or a.get("source","unknown")).lower()
+            for a in advisories_only
+            if (a.get("vendor","") or a.get("source","")) not in
+               ("hackernews","securityweek","helpnetsec","therecord","bleepingcomputer",
+                "darknetdiaries","krebsonsecurity","wired","ars_technica","cyberscoop")
+        )
         return jsonify({
             "api_version":    "v1",
             "generated":      datetime.now(timezone.utc).isoformat(),
             "total":          len(items),
+            "advisories_only":len(advisories_only),
             "by_severity": {
                 "critical": sum(1 for a in items if a.get("severity") == "Critical"),
                 "high":     sum(1 for a in items if a.get("severity") == "High"),
                 "medium":   sum(1 for a in items if a.get("severity") == "Medium"),
                 "low":      sum(1 for a in items if a.get("severity") == "Low"),
             },
-            "kev_count":      sum(1 for a in items if a.get("isKEV")),
-            "zero_day_count": sum(1 for a in items if a.get("zeroDay")),
-            "cnx_match_count":sum(1 for a in items if a.get("cnxMatch")),
-            "patch_available":sum(1 for a in items if a.get("patch_status") == "available"),
-            "top_vendors":    dict(vendor_counts.most_common(10)),
-            "feed_count":     SOURCE_COUNT,
+            "kev_count":       sum(1 for a in items if a.get("isKev") or a.get("source","") in ("cisa_kev","vulncheck_kev","CISA KEV")),
+            "zero_day_count":  sum(1 for a in items if a.get("zeroDay")),
+            "cnx_match_count": sum(1 for a in items if a.get("cnxStack")),
+            "patch_available": sum(1 for a in items if a.get("patch_status") == "available"),
+            "top_vendors":     dict(vc_filtered.most_common(10)),
+            "feed_count":      SOURCE_COUNT,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -4452,7 +4464,7 @@ def mcp_execute():
                           "severity":a.get("severity"),"cvss":a.get("cvss"),"epss":a.get("epss"),
                           "vendor":a.get("vendor"),"published":a.get("published"),
                           "isKEV":a.get("isKEV",False),"zeroDay":a.get("zeroDay",False),
-                          "cnxMatch":a.get("cnxMatch",""),"link":a.get("link","")} for a in items]
+                          "cnxMatch":a.get("cnxStack",""),"cnxTier":a.get("cnxTier",""),"link":a.get("link","")} for a in items]
             result = {"total": len(items), "returned": min(len(items),limit), "advisories": items[:limit]}
 
         elif tool == "get_advisory_detail":
@@ -4466,26 +4478,29 @@ def mcp_execute():
         elif tool == "get_kev_list":
             limit = min(int(inp.get("limit",50)), 500)
             items = supa_load_advisory_cache()
-            kev   = [a for a in items if a.get("isKEV")]
+            kev   = [a for a in items if a.get("isKev") or a.get("source","") in ("cisa_kev","vulncheck_kev","CISA KEV")]
             result = {"total": len(kev), "returned": min(len(kev),limit), "advisories": kev[:limit]}
 
         elif tool == "get_stats":
             from collections import Counter
             items  = supa_load_advisory_cache()
             vc     = Counter((a.get("vendor","") or a.get("source","unknown")).lower() for a in items)
+            adv_only = [a for a in items if not a.get("isNews")]
+            vc_f = Counter((a.get("vendor","") or a.get("source","unknown")).lower() for a in adv_only)
             result = {
                 "total": len(items),
+                "advisories_only": len(adv_only),
                 "by_severity": {
                     "critical": sum(1 for a in items if a.get("severity")=="Critical"),
                     "high":     sum(1 for a in items if a.get("severity")=="High"),
                     "medium":   sum(1 for a in items if a.get("severity")=="Medium"),
                     "low":      sum(1 for a in items if a.get("severity")=="Low"),
                 },
-                "kev_count":       sum(1 for a in items if a.get("isKEV")),
+                "kev_count":       sum(1 for a in items if a.get("isKev") or a.get("source","") in ("cisa_kev","vulncheck_kev","CISA KEV")),
                 "zero_day_count":  sum(1 for a in items if a.get("zeroDay")),
-                "cnx_match_count": sum(1 for a in items if a.get("cnxMatch")),
+                "cnx_match_count": sum(1 for a in items if a.get("cnxStack")),
                 "patch_available": sum(1 for a in items if a.get("patch_status")=="available"),
-                "top_vendors":     dict(vc.most_common(10)),
+                "top_vendors":     dict(vc_f.most_common(10)),
             }
 
         elif tool == "get_cnx_matches":
@@ -4493,8 +4508,8 @@ def mcp_execute():
             tier_f   = (inp.get("tier","") or "").lower()
             sev_f    = inp.get("severity","")
             items    = supa_load_advisory_cache()
-            matched  = [a for a in items if a.get("cnxMatch")]
-            if tier_f: matched = [a for a in matched if tier_f in (a.get("cnxMatch","") or "").lower()]
+            matched  = [a for a in items if a.get("cnxStack")]
+            if tier_f: matched = [a for a in matched if tier_f in (a.get("cnxTier","") or "").lower()]
             if sev_f:  matched = [a for a in matched if a.get("severity","").lower() == sev_f.lower()]
             result   = {"total": len(matched), "returned": min(len(matched),limit), "advisories": matched[:limit]}
 
