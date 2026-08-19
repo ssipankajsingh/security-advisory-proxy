@@ -1,10 +1,11 @@
 """
 Security Advisory RSS Proxy Server — Python v2
 ================================================
-All pending fixes applied —  2026 June 11
+All pending fixes applied — 2026 August 19
 """
 
 import os, re, json, time, logging, threading
+from collections import Counter
 from datetime import datetime, timezone, timedelta
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import feedparser, requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from flask_compress import Compress
 from cachetools import TTLCache
 from apscheduler.schedulers.background import BackgroundScheduler
 from sendgrid import SendGridAPIClient
@@ -23,6 +25,7 @@ log = logging.getLogger(__name__)
 
 # ─── APP ──────────────────────────────────────────────────────────────────────
 app = Flask(__name__)
+Compress(app)   # gzip all responses — reduces bandwidth ~87%
 CORS(app, origins=[
     "https://ssipankajsingh.github.io",
     "http://localhost:3000","http://localhost:5500","http://127.0.0.1:5500",
@@ -31,6 +34,7 @@ CORS(app, origins=[
 # ─── ENV ──────────────────────────────────────────────────────────────────────
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY","")
 ACCESS_CODE      = os.getenv("ACCESS_CODE","")
+NVD_API_KEY      = os.getenv("NVD_API_KEY","")     # Free key: nvd.nist.gov/developers/request-an-api-key
 ADMIN_PIN        = os.getenv("ADMIN_PIN","")   # Required for /admin/* routes — set on Render
 TEAMS_WEBHOOK    = os.getenv("TEAMS_WEBHOOK","")
 DIGEST_EMAIL     = os.getenv("DIGEST_EMAIL","")
@@ -163,8 +167,8 @@ def supa_load_archived(limit:int=200, offset:int=0, severity:str="",
     if not (SUPABASE_URL and SUPABASE_KEY): return []
     try:
         now_dt     = datetime.now(timezone.utc)
-        cutoff_old = (now_dt - timedelta(days=days_back)).isoformat()
-        cutoff_arc = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).isoformat()
+        cutoff_old = (now_dt - timedelta(days=days_back)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cutoff_arc = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
         results    = {}
 
         # Query A: explicitly archived rows within retention window
@@ -203,7 +207,7 @@ def supa_load_archived(limit:int=200, offset:int=0, severity:str="",
 def supa_get_sla_audit(days:int=365) -> list:
     if not (SUPABASE_URL and SUPABASE_KEY): return []
     try:
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
         r = requests.get(
             f"{SUPABASE_URL}/rest/v1/sla_audit_log?order=breached_at.desc&limit=500&breached_at=gte.{cutoff}",
             headers=supa_headers(), timeout=10)
@@ -255,10 +259,10 @@ def supa_save_archived():
     try:
         now_dt   = datetime.now(timezone.utc)
         now_iso  = now_dt.isoformat()
-        arch_cut = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).isoformat()
-        hard_cut = (now_dt - timedelta(days=365)).isoformat()
-        kev_cut  = (now_dt - timedelta(days=730)).isoformat()
-        met_cut  = (now_dt - timedelta(days=90)).isoformat()
+        arch_cut = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        hard_cut = (now_dt - timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        kev_cut  = (now_dt - timedelta(days=730)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        met_cut  = (now_dt - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         # Count active rows before
         before_r = requests.get(
@@ -373,10 +377,33 @@ CACHE_RETENTION_DAYS = {
     "high":     180,  # High — 6 months
     "default":   90,  # Medium/Low/Unknown — 90 days (was 365, caused table bloat)
 }
-ARCHIVE_AFTER_DAYS  = 14    # Archive non-KEV/non-ZeroDay rows after 14 days
-                            # (all fetched_at timestamps are post-July 2026 after bug fix;
-                            #  revisit in Sep 2026 when natural 60d history builds up)
-ACTIVE_ROW_HARD_CAP = 10000  # Safety valve: tighter cap to match 14d window
+ARCHIVE_AFTER_DAYS  = 30    # Archive non-KEV/non-ZeroDay rows after 30 days
+                            # (bumped from 14 as genuine fetched_at history now builds;
+                            #  revisit at 60 in Nov 2026 once 2-month history accumulates)
+ACTIVE_ROW_HARD_CAP = 12000  # Safety valve — ~400 advisories/day × 30d = ~12K active
+
+# Fields stripped from /advisories response to reduce outbound bandwidth
+# Frontend does NOT use these — stripping cuts payload ~40% before gzip
+RESPONSE_STRIP_FIELDS = {
+    "description",       # duplicates summary, often very long
+    "exploit_refs",      # large nested list rarely displayed
+    "epss_date",         # not shown in UI
+    "kev_notes",         # internal KEV metadata, not displayed
+    "author",            # not displayed
+    "data_quality",      # internal scoring field
+    "raw_summary",       # raw pre-normalised text
+    "_nvd_queried",      # internal flag
+    "nvd_enriched",      # internal flag
+    "severity_corrected_by_nvd",  # internal flag
+}
+
+def slim_advisory(a: dict) -> dict:
+    """Strip server-internal fields before sending to frontend. Reduces payload ~40%."""
+    out = {k: v for k, v in a.items() if k not in RESPONSE_STRIP_FIELDS}
+    # Truncate long text fields
+    if out.get("summary") and len(out["summary"]) > 400:
+        out["summary"] = out["summary"][:400] + "…"
+    return out
 
 def supa_save_advisory_cache(advisories:list) -> bool:
     if not (SUPABASE_URL and SUPABASE_KEY): return False
@@ -416,20 +443,25 @@ def supa_save_advisory_cache(advisories:list) -> bool:
         row_ids = [r["id"] for r in rows]
         existing_map = {}  # id → {fetched_at, severity, cvss, severity_corrected}
         try:
-            for i in range(0, len(row_ids), 500):
-                id_list = ",".join(row_ids[i:i+500])
+            # Only fetch IDs that already exist in Supabase — skips new CVEs
+            # Batch by 200 (shorter URLs, less chance of 414 Too Long)
+            for i in range(0, len(row_ids), 200):
+                batch = row_ids[i:i+200]
+                id_list = ",".join(batch)
                 cr = requests.get(
                     f"{SUPABASE_URL}/rest/v1/advisory_cache"
                     f"?select=id,fetched_at,severity,cvss,data&id=in.({id_list})",
                     headers=supa_headers(), timeout=15)
                 if cr.status_code == 200:
                     for ex in cr.json():
-                        existing_map[ex["id"]] = {
-                            "fetched_at":         ex.get("fetched_at"),
-                            "severity":           ex.get("severity"),
-                            "cvss":               ex.get("cvss"),
-                            "severity_corrected": bool((ex.get("data") or {}).get("severity_corrected_by_nvd")),
-                        }
+                        # Only store if fetched_at exists (genuinely pre-existing row)
+                        if ex.get("fetched_at"):
+                            existing_map[ex["id"]] = {
+                                "fetched_at":         ex.get("fetched_at"),
+                                "severity":           ex.get("severity"),
+                                "cvss":               ex.get("cvss"),
+                                "severity_corrected": bool((ex.get("data") or {}).get("severity_corrected_by_nvd")),
+                            }
         except Exception as e:
             log.debug(f"[SUPABASE] Pre-fetch for fetched_at/severity: {e}")
 
@@ -466,7 +498,7 @@ def supa_save_advisory_cache(advisories:list) -> bool:
             ("KEV",      CACHE_RETENTION_DAYS["kev"]),
             ("ZeroDay",  CACHE_RETENTION_DAYS["zeroday"]),
         ]:
-            cutoff = (now_dt - timedelta(days=days)).isoformat()
+            cutoff = (now_dt - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
             if retention_type == "KEV":
                 requests.delete(
                     f"{SUPABASE_URL}/rest/v1/advisory_cache?is_kev=eq.true&published=lt.{cutoff}",
@@ -477,14 +509,14 @@ def supa_save_advisory_cache(advisories:list) -> bool:
                     headers=supa_headers(), timeout=10)
 
         # Archive non-KEV rows older than ARCHIVE_AFTER_DAYS (use fetched_at, not published)
-        archive_cutoff = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).isoformat()
+        archive_cutoff = (now_dt - timedelta(days=ARCHIVE_AFTER_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
         requests.patch(
             f"{SUPABASE_URL}/rest/v1/advisory_cache"
             f"?is_archived=eq.false&is_kev=eq.false&is_zero_day=eq.false&fetched_at=lt.{archive_cutoff}",
             headers={**supa_headers(),"Prefer":"return=minimal"},
             json={"is_archived":True,"archived_at":now}, timeout=10)
         # Hard-delete rows older than 365d (use fetched_at, not published)
-        hard_cutoff = (now_dt - timedelta(days=365)).isoformat()
+        hard_cutoff = (now_dt - timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
         requests.delete(
             f"{SUPABASE_URL}/rest/v1/advisory_cache"
             f"?is_kev=eq.false&is_zero_day=eq.false&fetched_at=lt.{hard_cutoff}",
@@ -562,7 +594,7 @@ def supa_set_source_config(source_id:str, enabled:bool, updated_by:str) -> bool:
 def supa_purge_old_acks():
     if not (SUPABASE_URL and SUPABASE_KEY): return
     try:
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=365)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=365)).strftime("%Y-%m-%dT%H:%M:%SZ")
         requests.delete(f"{SUPABASE_URL}/rest/v1/acknowledgments?acknowledged_at=lt.{cutoff}", headers=supa_headers(), timeout=10)
         log.info("[SUPABASE] Old acks purged")
     except Exception as e: log.error(f"[SUPABASE] purge_acks: {e}")
@@ -1829,8 +1861,10 @@ def enrich_missing_cvss_from_nvd(advisories:list)->list:
     for a in needs:
         cve_id=a["cve"]
         try:
+            nvd_hdrs={"User-Agent":"Mozilla/5.0 (compatible)"}
+            if NVD_API_KEY: nvd_hdrs["apiKey"]=NVD_API_KEY
             r=requests.get(f"https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve_id}",
-                headers={"User-Agent":"Mozilla/5.0 (compatible)"},timeout=8)
+                headers=nvd_hdrs,timeout=8)
             if r.status_code==429: log.warning("[NVD-ENRICH] Rate limited"); break
             if r.status_code!=200: continue
             vulns=r.json().get("vulnerabilities",[])
@@ -2706,7 +2740,7 @@ def feed_metrics_history():
     """Return last 7 days of feed_metrics for sparklines in Feed Health Monitor."""
     if not (SUPABASE_URL and SUPABASE_KEY): return jsonify({"metrics":[]})
     try:
-        cutoff=(datetime.now(timezone.utc)-timedelta(days=7)).isoformat()
+        cutoff=(datetime.now(timezone.utc)-timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
         r=requests.get(
             f"{SUPABASE_URL}/rest/v1/feed_metrics?select=source_id,fetched_at,item_count,success"
             f"&fetched_at=gte.{cutoff}&order=fetched_at.desc&limit=15000",
@@ -2743,7 +2777,6 @@ def db_health():
                          headers={**supa_headers(),"Prefer":"count=exact"}, timeout=10)
         if r2.status_code == 200:
             acks = r2.json()
-            from collections import Counter
             status_counts = Counter(a.get("status","") for a in acks)
             stats["acknowledgments"] = {"total": len(acks), "by_status": dict(status_counts)}
         return jsonify({"success": True, "stats": stats, "timestamp": datetime.now(timezone.utc).isoformat()})
@@ -2795,7 +2828,7 @@ def advisories():
                     result = {
                         "total":     len(cached),
                         "generated": datetime.now(timezone.utc).isoformat(),
-                        "advisories":cached[:15000],
+                        "advisories":[slim_advisory(a) for a in cached[:15000]],
                         "source":    "cache" if cached else "empty",
                     }
                     _advisories_result = result
@@ -2843,7 +2876,7 @@ def advisories():
         # No Supabase — live fetch (dev/local mode only)
         all_adv = fetch_all_advisories()
         return jsonify({"total":len(all_adv),"generated":datetime.now(timezone.utc).isoformat(),
-            "advisories":all_adv[:15000],"source":"live"})
+            "advisories":[slim_advisory(a) for a in all_adv[:15000]],"source":"live"})
 
     except Exception as e:
         log.error(f"[ADVISORIES] Unhandled error: {e}")
@@ -3416,7 +3449,7 @@ def generate_handover_report(window_hours: int = 12) -> dict:
         advisories = load_from_supabase() or []
         acks       = supa_get_acks()
         now        = datetime.now(timezone.utc)
-        cutoff_iso = (now - timedelta(hours=window_hours)).isoformat()
+        cutoff_iso = (now - timedelta(hours=window_hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
         SLA_LIMITS = {"Critical":24,"High":72,"Medium":168,"Low":720}
 
         new_adv   = [a for a in advisories if a.get("fetched_at","")>=cutoff_iso and a["id"] not in acks]
@@ -4136,11 +4169,18 @@ def _record_usage_async(key: str, endpoint: str):
     """Fire-and-forget: update last_used_at + total_requests in Supabase."""
     def _write():
         try:
+            # Read current total then increment — no SQL trigger needed
+            r = requests.get(
+                f"{SUPABASE_URL}/rest/v1/api_keys?key=eq.{key}&select=total_requests",
+                headers=supa_headers(), timeout=5)
+            current = 0
+            if r.status_code == 200 and r.json():
+                current = r.json()[0].get("total_requests") or 0
             requests.patch(
                 f"{SUPABASE_URL}/rest/v1/api_keys?key=eq.{key}",
                 headers={**supa_headers(), "Prefer": "return=minimal"},
                 json={"last_used_at": datetime.now(timezone.utc).isoformat(),
-                      "total_requests": None},  # incremented via SQL trigger or manual
+                      "total_requests": current + 1},
                 timeout=5)
         except Exception:
             pass
@@ -4248,7 +4288,7 @@ def _apply_advisory_filters(items: list, args) -> list:
     if zd_only:   items = [a for a in items if a.get("zeroDay")]
     if cnx_only:  items = [a for a in items if a.get("cnxStack")]
     if days:
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
         items  = [a for a in items if (a.get("published") or "") >= cutoff[:10]]
     if q:
         items = [a for a in items if q in (
@@ -4390,7 +4430,6 @@ def v1_stats():
     """
     try:
         items = supa_load_advisory_cache()
-        from collections import Counter
         vendor_counts = Counter(
             (a.get("vendor","") or a.get("source","unknown")).lower()
             for a in items
@@ -4638,7 +4677,6 @@ def mcp_execute():
             result = {"total": len(kev), "returned": min(len(kev),limit), "advisories": kev[:limit]}
 
         elif tool == "get_stats":
-            from collections import Counter
             items  = supa_load_advisory_cache()
             vc     = Counter((a.get("vendor","") or a.get("source","unknown")).lower() for a in items)
             adv_only = [a for a in items if not a.get("isNews")]
