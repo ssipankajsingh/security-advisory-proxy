@@ -599,15 +599,34 @@ def supa_load_advisory_cache(bypass_mem_cache: bool = False) -> list:
         log.info(f"[MEM-CACHE] Populated: {len(deduped)} items, TTL {MEM_CACHE_TTL}s")
     return deduped
 
+# In-memory source config cache — avoid Supabase call every feed fetch
+_source_config_cache: dict = {}
+_source_config_ts: float   = 0.0
+SOURCE_CONFIG_TTL           = 300  # 5 minutes
+
 def supa_get_source_config() -> dict:
+    """Return {source_id: enabled} dict. Cached 5 min to avoid per-fetch Supabase calls."""
+    global _source_config_cache, _source_config_ts
+    now = time.time()
+    if _source_config_cache and (now - _source_config_ts) < SOURCE_CONFIG_TTL:
+        return dict(_source_config_cache)
     if not (SUPABASE_URL and SUPABASE_KEY): return {}
     try:
-        r = requests.get(f"{SUPABASE_URL}/rest/v1/source_config?select=*", headers=supa_headers(), timeout=8)
-        if r.status_code == 200: return {row["id"]:row["enabled"] for row in r.json()}
-    except Exception as e: log.error(f"[SUPABASE] get_source_config: {e}")
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/source_config?select=*",
+                         headers=supa_headers(), timeout=8)
+        if r.status_code == 200:
+            cfg = {row["id"]: row.get("enabled", True) for row in r.json()}
+            _source_config_cache = cfg
+            _source_config_ts    = now
+            return dict(cfg)
+    except Exception as e:
+        log.error(f"[SUPABASE] get_source_config: {e}")
     return {}
 
 def supa_set_source_config(source_id:str, enabled:bool, updated_by:str) -> bool:
+    global _source_config_cache, _source_config_ts
+    _source_config_cache = {}   # invalidate cache on write
+    _source_config_ts    = 0.0
     if not (SUPABASE_URL and SUPABASE_KEY): return False
     try:
         h = {**supa_headers(),"Prefer":"resolution=merge-duplicates,return=representation"}
@@ -2626,8 +2645,18 @@ def enrich_with_vulncheck(advisories: list) -> list:
 
 def fetch_all_advisories() -> list:
     results = []; futures = {}
+    # Load source enabled/disabled config from Supabase (cached 5 min)
+    # This makes enable/disable state shared across all browsers/users
+    src_cfg    = supa_get_source_config()  # {source_id: bool}
+    skip_count = 0
     with ThreadPoolExecutor(max_workers=25) as executor:
         for key, url in TRUSTED_FEEDS.items():
+            # Respect per-source enabled/disabled state from Supabase
+            # If not in config at all, default to enabled (True)
+            if src_cfg.get(key, True) is False:
+                log.debug(f"[FETCH] Skipping disabled source: {key}")
+                skip_count += 1
+                continue
             if key == "cisa_kev":        futures[executor.submit(fetch_cisa_kev)] = key
             elif key == "ghsa":           futures[executor.submit(fetch_ghsa)] = key
             elif key == "osv":            futures[executor.submit(fetch_osv)] = key
@@ -2639,6 +2668,7 @@ def fetch_all_advisories() -> list:
         for future in as_completed(futures):
             try: results.extend(future.result())
             except Exception as e: log.error(f"Thread error: {e}")
+    if skip_count: log.info(f"[FETCH] Skipped {skip_count} disabled sources")
 
     # ── Sort BEFORE dedupe so OEM entries always win the dedup race ──
     sev_order = {"Critical":0,"High":1,"Medium":2,"Low":3,"Unknown":4}
@@ -3065,7 +3095,9 @@ def get_source_config():
 @require_auth
 def set_source_config_route():
     data = request.get_json() or {}
-    ok = supa_set_source_config(data.get("id",""), data.get("enabled",True), data.get("by","Team Member"))
+    # Accept both 'id' and 'source_id' field names (frontend sends 'source_id')
+    src_id = data.get("id","") or data.get("source_id","")
+    ok = supa_set_source_config(src_id, data.get("enabled",True), data.get("by","Team Member"))
     return jsonify({"success":ok})
 
 @app.route("/source-config/clear", methods=["POST"])
