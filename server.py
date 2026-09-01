@@ -1,7 +1,7 @@
 """
 Security Advisory RSS Proxy Server — Python v2
 ================================================
-All pending fixes applied — 2026 August 19
+All pending fixes applied — 2026 Sept 1
 """
 
 import os, re, json, time, logging, threading
