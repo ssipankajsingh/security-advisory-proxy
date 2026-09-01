@@ -501,8 +501,11 @@ def supa_save_advisory_cache(advisories:list) -> bool:
             else:
                 saved += len(rows[i:i+100])
 
-        # R2/R4 fix: retention based on published date AND advisory type
-        # KEV + ZeroDay items kept longer — they remain exploitable past 30 days
+        # R2/R4 fix: retention based on advisory type.
+        # KEV + ZeroDay items kept longer — they remain exploitable past 30 days.
+        # Filter on fetched_at, NOT published — published is the CVE's original
+        # disclosure date (e.g. Log4Shell = 2021) and never changes, so filtering
+        # on it would hard-delete long-standing KEV/ZeroDay entries on every save.
         now_dt = datetime.now(timezone.utc)
         for retention_type, days in [
             ("KEV",      CACHE_RETENTION_DAYS["kev"]),
@@ -511,11 +514,11 @@ def supa_save_advisory_cache(advisories:list) -> bool:
             cutoff = (now_dt - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
             if retention_type == "KEV":
                 requests.delete(
-                    f"{SUPABASE_URL}/rest/v1/advisory_cache?is_kev=eq.true&published=lt.{cutoff}",
+                    f"{SUPABASE_URL}/rest/v1/advisory_cache?is_kev=eq.true&fetched_at=lt.{cutoff}",
                     headers=supa_headers(), timeout=10)
             else:
                 requests.delete(
-                    f"{SUPABASE_URL}/rest/v1/advisory_cache?is_zero_day=eq.true&is_kev=eq.false&published=lt.{cutoff}",
+                    f"{SUPABASE_URL}/rest/v1/advisory_cache?is_zero_day=eq.true&is_kev=eq.false&fetched_at=lt.{cutoff}",
                     headers=supa_headers(), timeout=10)
 
         # Archive non-KEV rows older than ARCHIVE_AFTER_DAYS (use fetched_at, not published)
