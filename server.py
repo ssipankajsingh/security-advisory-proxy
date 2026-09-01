@@ -1,10 +1,10 @@
 """
 Security Advisory RSS Proxy Server — Python v2
 ================================================
-All pending fixes applied — 2026 1st Sept
+All pending fixes applied — 2026 August 19
 """
 
-import os, re, json, time, logging, threading
+import os, re, json, time, logging, threading, secrets
 from collections import Counter
 from datetime import datetime, timezone, timedelta
 from functools import wraps
@@ -1678,9 +1678,10 @@ def normalise_entry(entry, source:str) -> dict:
     cvss_score   = extract_cvss_v3(combined)
     severity_raw = parse_severity(combined, source=source, is_oem=is_oem)
     # NEWS items capped at Medium — keyword matches on news titles inflate severity
-    severity = min(["Critical","High","Medium","Low","Unknown"].index(severity_raw),
-                   ["Critical","High","Medium","Low","Unknown"].index("Medium") if is_news else 0)
-    severity = ["Critical","High","Medium","Low","Unknown"][severity]
+    # Cap is a max index into SEV_LEVELS: 2 = Medium for news, 0 = no cap otherwise.
+    # (Was min(..., 0), which floored every non-news item at index 0 = Critical.)
+    SEV_LEVELS = ["Critical","High","Medium","Low","Unknown"]
+    severity = SEV_LEVELS[max(SEV_LEVELS.index(severity_raw), 2 if is_news else 0)]
     # Zero-day: keyword detection OR source-based inference
     zero_day = is_zero_day(combined) or is_zero_src
 
@@ -1874,7 +1875,9 @@ def fetch_cisa_kev() -> list:
                 "fetched_at":datetime.now(timezone.utc).isoformat(),
                 "kev_due_date":due_date,"required_action":required_act,
                 "kev_notes":kev_notes,"patch_status":patch_status})
-        items = [i for i in items if is_within_window(i.get("published",""))]
+        # KEV entries have a 2-year retention window — MUST pass is_kev=True
+        # or default 90d filter silently drops KEV items added >90 days ago.
+        items = [i for i in items if is_within_window(i.get("published",""), is_kev=True)]
         with cache_lock: cache["cisa_kev"] = items
         log.info(f"[cisa_kev] ✅ {len(items)} items")
         return items
@@ -3842,7 +3845,7 @@ def repair_severity():
     Protected by ACCESS_CODE (same as the main dashboard).
 
     Usage:
-      GET /repair-severity?code=CNXadvisorySEC@123
+      GET /repair-severity?code=<ACCESS_CODE>
       Returns JSON with corrected count and details.
     """
     provided = request.args.get("code","") or request.headers.get("X-Access-Code","")
@@ -3969,7 +3972,7 @@ def apply_grants():
     Apply explicit Postgres grants required by Supabase from Oct 30, 2026.
     Supabase is removing implicit grants — PostgREST needs explicit GRANT on all tables.
     Run once before Oct 30, 2026:
-      GET /apply-grants?code=CNXadvisorySEC@123
+      GET /apply-grants?code=<ACCESS_CODE>
 
     Reference: https://supabase.com/docs/guides/database/postgres/roles
     """
@@ -4011,7 +4014,7 @@ def apply_grants():
 def create_indexes():
     """
     One-time endpoint: creates performance indexes on advisory_cache via Supabase RPC.
-    Run once after deploy: /create-indexes?code=CNXadvisorySEC@123
+    Run once after deploy: /create-indexes?code=<ACCESS_CODE>
     Safe to run multiple times (IF NOT EXISTS).
     """
     provided = request.args.get("code","") or request.headers.get("X-Access-Code","")
