@@ -1,9 +1,25 @@
+# ── Web framework ────────────────────────────────────────────────────────────
 flask>=3.0.0
 flask-cors>=4.0.0
 flask-compress>=1.14
+
+# ── WSGI server ──────────────────────────────────────────────────────────────
+# gunicorn[gevent] pulls in packaging automatically — required after gunicorn
+# removed packaging as a runtime dependency in 2026. Without [gevent] extra,
+# the ggevent worker fails to import on Python 3.14 (no setuptools = no packaging).
+gunicorn[gevent]>=23.0.0
+gevent>=23.9.1
+packaging>=23.2
+setuptools>=69.0.0
+
+# ── Feeds & HTTP ─────────────────────────────────────────────────────────────
 feedparser>=6.0.11
 requests>=2.31.0
-apscheduler>=3.10.4
-gevent>=23.9.1
-gunicorn>=21.2.0
 python-dateutil>=2.8.2
+
+# ── Caching & scheduling ─────────────────────────────────────────────────────
+cachetools>=5.3.0
+apscheduler>=3.10.4
+
+# ── Email ────────────────────────────────────────────────────────────────────
+sendgrid>=6.11.0
