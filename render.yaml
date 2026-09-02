@@ -9,6 +9,8 @@ services:
         sync: false
       - key: ACCESS_CODE
         sync: false
+      - key: VIEWER_ACCESS_CODE
+        sync: false
       - key: TEAMS_WEBHOOK
         sync: false
       - key: DIGEST_EMAIL

@@ -34,6 +34,7 @@ CORS(app, origins=[
 # ─── ENV ──────────────────────────────────────────────────────────────────────
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY","")
 ACCESS_CODE      = os.getenv("ACCESS_CODE","")
+VIEWER_ACCESS_CODE = os.getenv("VIEWER_ACCESS_CODE","")  # optional read-only team code — no write access
 NVD_API_KEY      = os.getenv("NVD_API_KEY","")     # Free key: nvd.nist.gov/developers/request-an-api-key
 ADMIN_PIN        = os.getenv("ADMIN_PIN","")   # Required for /admin/* routes — set on Render
 TEAMS_WEBHOOK    = os.getenv("TEAMS_WEBHOOK","")
@@ -1080,6 +1081,7 @@ log.info(f"   Sources   : 148 monitored / {SOURCE_COUNT} active feeds (+ GHSA/OS
 log.info(f"   VulnCheck : {'✅ API key set' if VULNCHECK_API_KEY else '⚠️  No API key (set VULNCHECK_API_KEY for pre-NVD data)'}")
 log.info(f"   Email     : {'✅ SendGrid' if SENDGRID_API_KEY else '⚠️  No SendGrid'}")
 log.info(f"   Auth      : {'✅ Access code set' if ACCESS_CODE else '⚠️  No access code'}")
+log.info(f"   Viewer    : {'✅ Read-only code set' if VIEWER_ACCESS_CODE else 'ℹ️  No viewer code (read-only sharing disabled)'}")
 log.info(f"   Teams     : {'✅ Webhook set' if TEAMS_WEBHOOK else '⚠️  No webhook'}")
 log.info(f"   Supabase  : {'✅ Persistent storage' if SUPABASE_URL else '⚠️  Memory only'}")
 
@@ -2716,6 +2718,11 @@ def fetch_all_advisories() -> list:
 
 # ─── AUTH ─────────────────────────────────────────────────────────────────────
 def require_auth(f):
+    """
+    Accepts either ACCESS_CODE (full access) or VIEWER_ACCESS_CODE (read-only).
+    Sets request.access_role to "admin" or "viewer" for downstream checks —
+    see require_full_access below, which blocks viewers from write routes.
+    """
     @wraps(f)
     def decorated(*args, **kwargs):
         _body = request.get_json(silent=True) or {}
@@ -2723,8 +2730,33 @@ def require_auth(f):
                  or request.args.get("access_code","")
                  or _body.get("accessCode")
                  or _body.get("code"))
-        if not ACCESS_CODE or token == ACCESS_CODE: return f(*args, **kwargs)
+        if not ACCESS_CODE:
+            request.access_role = "admin"
+            return f(*args, **kwargs)
+        if token == ACCESS_CODE:
+            request.access_role = "admin"
+            return f(*args, **kwargs)
+        if VIEWER_ACCESS_CODE and token == VIEWER_ACCESS_CODE:
+            request.access_role = "viewer"
+            return f(*args, **kwargs)
         return jsonify({"error":"Unauthorized"}), 401
+    return decorated
+
+def require_full_access(f):
+    """
+    Blocks the read-only viewer role from write/action endpoints.
+    Stack directly under @require_auth (which sets request.access_role) — e.g.:
+        @app.route("/ack", methods=["POST"])
+        @require_auth
+        @require_full_access
+        def set_ack(): ...
+    """
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if getattr(request, "access_role", "admin") == "viewer":
+            return jsonify({"error":"Read-only access",
+                             "message":"This action requires full access. Contact the GSE team."}), 403
+        return f(*args, **kwargs)
     return decorated
 
 # ─── ROUTES ───────────────────────────────────────────────────────────────────
@@ -2743,9 +2775,16 @@ def health():
 def auth_verify():
     data = request.get_json() or {}
     submitted = (data.get("code") or data.get("accessCode") or "").strip()
-    valid = not ACCESS_CODE or submitted == ACCESS_CODE.strip()
-    log.info(f"[AUTH] {'✅ SUCCESS' if valid else '❌ FAILED'}")
-    if valid: return jsonify({"valid":True,"success":True})
+    if not ACCESS_CODE:
+        log.info("[AUTH] ✅ SUCCESS (no ACCESS_CODE configured — open access)")
+        return jsonify({"valid":True,"success":True,"role":"admin"})
+    if submitted == ACCESS_CODE.strip():
+        log.info("[AUTH] ✅ SUCCESS (full access)")
+        return jsonify({"valid":True,"success":True,"role":"admin"})
+    if VIEWER_ACCESS_CODE and submitted == VIEWER_ACCESS_CODE.strip():
+        log.info("[AUTH] ✅ SUCCESS (viewer/read-only)")
+        return jsonify({"valid":True,"success":True,"role":"viewer"})
+    log.info("[AUTH] ❌ FAILED")
     return jsonify({"valid":False,"success":False,"error":"Invalid access code"}), 401
 
 @app.route("/saved-searches", methods=["GET"])
@@ -2756,6 +2795,7 @@ def get_saved_searches():
 
 @app.route("/saved-searches", methods=["POST"])
 @require_auth
+@require_full_access
 def create_saved_search():
     data = request.get_json() or {}
     ok = supa_save_saved_search(data.get("name","Untitled"),data.get("owner",""),
@@ -2764,6 +2804,7 @@ def create_saved_search():
 
 @app.route("/saved-searches/<int:sid>", methods=["DELETE"])
 @require_auth
+@require_full_access
 def delete_saved_search(sid):
     return jsonify({"success":supa_delete_saved_search(sid)})
 
@@ -2969,6 +3010,7 @@ def get_acks():
 
 @app.route("/ack", methods=["POST"])
 @require_auth
+@require_full_access
 def set_ack():
     data        = request.get_json() or {}
     advisory_id = data.get("id","").strip()
@@ -2986,6 +3028,7 @@ def set_ack():
 
 @app.route("/ack/bulk", methods=["POST"])
 @require_auth
+@require_full_access
 def bulk_ack():
     """Bulk ack/status-update up to 100 advisories at once."""
     d=request.get_json() or {}
@@ -2997,6 +3040,7 @@ def bulk_ack():
 
 @app.route("/ack/<path:advisory_id>", methods=["DELETE"])
 @require_auth
+@require_full_access
 def clear_ack(advisory_id):
     data = request.get_json() or {}
     by   = data.get("by","").strip()
@@ -3078,6 +3122,7 @@ def feed_check():
 
 @app.route("/cache/clear", methods=["POST"])
 @require_auth
+@require_full_access
 def clear_advisory_cache():
     global _mem_advisory_cache, _mem_advisory_ts
     with _mem_advisory_lock:
@@ -3099,6 +3144,7 @@ def get_source_config():
 
 @app.route("/source-config", methods=["POST"])
 @require_auth
+@require_full_access
 def set_source_config_route():
     data = request.get_json() or {}
     # Accept both 'id' and 'source_id' field names (frontend sends 'source_id')
@@ -3108,6 +3154,7 @@ def set_source_config_route():
 
 @app.route("/source-config/clear", methods=["POST"])
 @require_auth
+@require_full_access
 def clear_source_config():
     if not (SUPABASE_URL and SUPABASE_KEY): return jsonify({"error":"Supabase not configured"}), 503
     try:
@@ -3167,6 +3214,7 @@ NOTIFY_COOLDOWN_SECONDS = 7200  # 2 hours
 
 @app.route("/notify/critical", methods=["POST"])
 @require_auth
+@require_full_access
 def notify_critical():
     """
     Instant alert for Critical/Zero-Day advisories.
@@ -3308,6 +3356,7 @@ def notify_critical():
 
 @app.route("/email-weekly", methods=["POST"])
 @require_auth
+@require_full_access
 def email_weekly():
     """
     Send a weekly summary report of top advisories.
@@ -3435,6 +3484,7 @@ def email_weekly():
 
 @app.route("/email-digest", methods=["POST"])
 @require_auth
+@require_full_access
 def email_digest():
     if not SENDGRID_API_KEY: return jsonify({"error":"SendGrid not configured"}), 503
     data = request.get_json() or {}
@@ -3493,17 +3543,19 @@ def send_teams_card(webhook_url:str, advisories:list):
 @app.route("/handover-report", methods=["GET","POST"])
 @require_auth
 def handover_report_route():
-    """On-demand shift handover report. Add ?send=true to also push to Teams."""
+    """On-demand shift handover report. Add ?send=true to also push to Teams (viewer role excluded)."""
     data   = request.get_json() or {}
     window = int(request.args.get("window", data.get("window_hours", 12)))
     report = generate_handover_report(window_hours=window)
-    if (request.args.get("send","false").lower()=="true" or data.get("send")) and TEAMS_WEBHOOK:
+    is_viewer = getattr(request, "access_role", "admin") == "viewer"
+    if (request.args.get("send","false").lower()=="true" or data.get("send")) and TEAMS_WEBHOOK and not is_viewer:
         send_handover_teams_card(TEAMS_WEBHOOK, report)
     return jsonify({"success":True,"report":report})
 
 
 @app.route("/teams-notify", methods=["POST"])
 @require_auth
+@require_full_access
 def teams_notify():
     data = request.get_json() or {}
     webhook_url = data.get("webhookUrl") or TEAMS_WEBHOOK
