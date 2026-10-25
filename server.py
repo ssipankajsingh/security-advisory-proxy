@@ -2772,9 +2772,20 @@ def root():
     return jsonify({"name":"Security Advisory Proxy","version":"v2","status":"running",
         "sources":SOURCE_COUNT,"uptime":int(time.time()-START_TIME)})
 
+def _rss_mb():
+    """Resident memory of this process in MB (Linux /proc) — None elsewhere. Free tier limit is 512 MB."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return round(int(line.split()[1]) / 1024)
+    except Exception:
+        return None
+
 @app.route("/health")
 def health():
-    return jsonify({"status":"ok","version":"v2","sources":SOURCE_COUNT,"uptime":int(time.time()-START_TIME)})
+    return jsonify({"status":"ok","version":"v2","sources":SOURCE_COUNT,"uptime":int(time.time()-START_TIME),
+                    "rss_mb":_rss_mb(),"refreshing":_bg_refresh_running.is_set() or _fetch_in_progress.is_set()})
 
 @app.route("/auth/verify", methods=["POST"])
 def auth_verify():
