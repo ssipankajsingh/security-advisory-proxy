@@ -1,17 +1,33 @@
 services:
   - type: web
     name: security-advisory-proxy
-    runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn server:app --bind 0.0.0.0:$PORT --workers 1 --worker-class gevent --timeout 300 --graceful-timeout 300
-    envVars:
-      - key: SENDGRID_API_KEY
-        sync: false
+    runtime: docker            # Dockerfile pins Python 3.11 — native runtime ignored .python-version
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:                   # sync:false = value set in Render dashboard, never stored in git
       - key: ACCESS_CODE
         sync: false
       - key: VIEWER_ACCESS_CODE
         sync: false
-      - key: TEAMS_WEBHOOK
+      - key: ADMIN_PIN
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: CRON_SECRET
+        sync: false
+      - key: NVD_API_KEY
+        sync: false
+      - key: VULNCHECK_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: SENDGRID_API_KEY
+        sync: false
+      - key: SENDER_EMAIL
         sync: false
       - key: DIGEST_EMAIL
+        sync: false
+      - key: TEAMS_WEBHOOK
         sync: false
