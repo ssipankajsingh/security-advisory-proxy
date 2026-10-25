@@ -28,6 +28,7 @@ app = Flask(__name__)
 Compress(app)   # gzip all responses — reduces bandwidth ~87%
 CORS(app, origins=[
     "https://ssipankajsingh.github.io",
+    "https://az-cnx-use-prd-mcp-socadv-ca1.greentree-51225e4d.eastus.azurecontainerapps.io",
     "http://localhost:3000","http://localhost:5500","http://127.0.0.1:5500",
 ])
 
