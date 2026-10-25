@@ -78,6 +78,23 @@ def _pgq(value) -> str:
     """URL-encode a value for a PostgREST filter (eq.<value>) — stops & / = / ? injection."""
     return requests.utils.quote(str(value), safe="")
 
+def _pg_in(values) -> str:
+    """URL-encoded PostgREST in.() filter with each value double-quoted, so ids containing
+    , ( ) & or quotes can't break or truncate the list."""
+    quoted = ",".join('"' + str(v).replace("\\", "\\\\").replace('"', '\\"') + '"' for v in values)
+    return _pgq(f"in.({quoted})")
+
+def _pg_id_batches(ids, max_ids=100, max_chars=5000):
+    """Yield id batches whose encoded in.() filter stays well under URL length limits."""
+    batch, size = [], 0
+    for i in ids:
+        est = len(_pgq(i)) + 9            # quotes + comma, encoded
+        if batch and (len(batch) >= max_ids or size + est > max_chars):
+            yield batch; batch, size = [], 0
+        batch.append(i); size += est
+    if batch:
+        yield batch
+
 def supa_headers(prefer="return=representation"):
     return {"apikey":SUPABASE_KEY,"Authorization":f"Bearer {SUPABASE_KEY}",
             "Content-Type":"application/json","Prefer":prefer}
@@ -325,7 +342,7 @@ def supa_save_archived():
                 for i in range(0, len(ids), 200):
                     batch = ids[i:i+200]
                     requests.patch(
-                        f"{SUPABASE_URL}/rest/v1/advisory_cache?id=in.({','.join(batch)})",
+                        f"{SUPABASE_URL}/rest/v1/advisory_cache?id={_pg_in(batch)}",
                         headers={**supa_headers(),"Prefer":"return=minimal"},
                         json={"is_archived":True,"archived_at":now_iso}, timeout=20)
                 log.info(f"[NIGHTLY] Safety valve archived {len(ids)} rows")
@@ -458,28 +475,41 @@ def supa_save_advisory_cache(advisories:list) -> bool:
         h = {**supa_headers(), "Prefer": "resolution=merge-duplicates"}
         row_ids = [r["id"] for r in rows]
         existing_map = {}  # id → {fetched_at, severity, cvss, severity_corrected}
-        try:
-            # Only fetch IDs that already exist in Supabase — skips new CVEs
-            # Batch by 200 (shorter URLs, less chance of 414 Too Long)
-            for i in range(0, len(row_ids), 200):
-                batch = row_ids[i:i+200]
-                id_list = ",".join(batch)
-                cr = requests.get(
-                    f"{SUPABASE_URL}/rest/v1/advisory_cache"
-                    f"?select=id,fetched_at,severity,cvss,data&id=in.({id_list})",
-                    headers=supa_headers(), timeout=15)
-                if cr.status_code == 200:
-                    for ex in cr.json():
-                        # Only store if fetched_at exists (genuinely pre-existing row)
-                        if ex.get("fetched_at"):
-                            existing_map[ex["id"]] = {
-                                "fetched_at":         ex.get("fetched_at"),
-                                "severity":           ex.get("severity"),
-                                "cvss":               ex.get("cvss"),
-                                "severity_corrected": bool((ex.get("data") or {}).get("severity_corrected_by_nvd")),
-                            }
-        except Exception as e:
-            log.debug(f"[SUPABASE] Pre-fetch for fetched_at/severity: {e}")
+        # Look up existing rows in small, size-capped batches. Previous version used
+        # 200-id batches in one try: a too-long URL (ids can be 500-char URLs) or one
+        # timeout silently skipped batches, and every skipped row got fetched_at=now.
+        failed_ids = set()
+        for batch in _pg_id_batches(row_ids):
+            ok = False
+            for attempt in (1, 2):
+                try:
+                    cr = requests.get(
+                        f"{SUPABASE_URL}/rest/v1/advisory_cache"
+                        f"?select=id,fetched_at,severity,cvss,data&id={_pg_in(batch)}",
+                        headers=supa_headers(), timeout=30)
+                    if cr.status_code == 200:
+                        for ex in cr.json():
+                            # Only store if fetched_at exists (genuinely pre-existing row)
+                            if ex.get("fetched_at"):
+                                existing_map[ex["id"]] = {
+                                    "fetched_at":         ex.get("fetched_at"),
+                                    "severity":           ex.get("severity"),
+                                    "cvss":               ex.get("cvss"),
+                                    "severity_corrected": bool((ex.get("data") or {}).get("severity_corrected_by_nvd")),
+                                }
+                        ok = True
+                        break
+                    log.warning(f"[SUPABASE] Pre-fetch batch HTTP {cr.status_code} (attempt {attempt}): {cr.text[:120]}")
+                except Exception as e:
+                    log.warning(f"[SUPABASE] Pre-fetch batch error (attempt {attempt}): {e}")
+            if not ok:
+                failed_ids.update(batch)
+        if failed_ids:
+            # Can't confirm these rows' first-seen date — skip them this cycle rather than
+            # overwrite fetched_at. They are picked up on the next refresh.
+            rows = [r for r in rows if r["id"] not in failed_ids]
+            log.warning(f"[SUPABASE] Skipping {len(failed_ids)} rows whose existing fetched_at could not be read")
+        log.info(f"[SUPABASE] Pre-fetch: {len(existing_map)} existing, {len(rows)-len([r for r in rows if r['id'] in existing_map])} new, {len(failed_ids)} skipped")
 
         # Restore preserved values into upsert rows
         for row in rows:
