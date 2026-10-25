@@ -4448,7 +4448,8 @@ def _apply_advisory_filters(items: list, args) -> list:
     kev_only = args.get("kev","").lower() in ("true","1","yes")
     zd_only  = args.get("zero_day","").lower() in ("true","1","yes")
     cnx_only = args.get("cnx_match","").lower() in ("true","1","yes")
-    days     = int(args.get("days", 0))
+    try:    days = int(args.get("days") or 0)   # "" / None / junk → no date filter
+    except (TypeError, ValueError): days = 0
     q        = args.get("q","").strip().lower()  # free-text search
 
     if severity:  items = [a for a in items if (a.get("severity","") or "").lower() == severity.lower()]
