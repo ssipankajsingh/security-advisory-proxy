@@ -4159,7 +4159,7 @@ def trigger_morning():
     Protected by CRON_SECRET — same secret used for /fetch-now.
 
     cron-job.org setup:
-      URL: https://security-advisory-proxy.onrender.com/trigger-morning?secret=YOUR_SECRET
+      URL: https://security-advisory-proxy-docker.onrender.com/trigger-morning?secret=YOUR_SECRET
       Schedule: Every day at 02:30 UTC
       Method: GET
 
@@ -4193,7 +4193,7 @@ def trigger_evening():
     Protected by CRON_SECRET.
 
     cron-job.org setup:
-      URL: https://security-advisory-proxy.onrender.com/trigger-evening?secret=YOUR_SECRET
+      URL: https://security-advisory-proxy-docker.onrender.com/trigger-evening?secret=YOUR_SECRET
       Schedule: Every day at 14:30 UTC
       Method: GET
     """
@@ -4223,7 +4223,7 @@ def fetch_now():
     If CRON_SECRET is not set, endpoint is disabled.
 
     cron-job.org setup:
-      URL: https://security-advisory-proxy.onrender.com/fetch-now?secret=YOUR_SECRET
+      URL: https://security-advisory-proxy-docker.onrender.com/fetch-now?secret=YOUR_SECRET
       Schedule: Every 30 minutes
       Method: GET
     """
@@ -4928,7 +4928,7 @@ def v1_root():
     return jsonify({
         "api":      "Concentrix GSE/SOC Security Advisory Platform",
         "version":  "v1",
-        "base_url": "https://security-advisory-proxy.onrender.com",
+        "base_url": "https://security-advisory-proxy-docker.onrender.com",
         "auth":     "X-API-Key header required for all endpoints except this one",
         "endpoints": {
             "GET  /v1/advisories":        "Filtered advisory feed (params: severity, vendor, cve_id, kev, zero_day, cnx_match, days, q, limit, format)",
