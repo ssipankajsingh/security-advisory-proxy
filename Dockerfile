@@ -19,4 +19,7 @@ ENV PORT=3001
 EXPOSE 3001
 
 # Shell form so $PORT is expanded at runtime. exec replaces the shell so gunicorn gets SIGTERM directly.
-CMD exec gunicorn server:app --bind 0.0.0.0:${PORT} --workers 1 --worker-class gevent --timeout 300 --graceful-timeout 300
+# gthread (real threads), not gevent: the feed refresh is CPU-heavy and starved the gevent loop,
+# so /health stopped answering and Render restarted the instance mid-refresh.
+# 1 worker only — in-memory caches and APScheduler jobs must not be duplicated.
+CMD exec gunicorn server:app --bind 0.0.0.0:${PORT} --workers 1 --worker-class gthread --threads 8 --timeout 300 --graceful-timeout 300
