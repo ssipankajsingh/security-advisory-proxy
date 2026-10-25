@@ -2917,6 +2917,20 @@ def feed_metrics_history():
     except Exception as e: return jsonify({"error":str(e),"metrics":[]}),500
 
 
+def _supabase_key_role() -> str:
+    """Role of SUPABASE_KEY (never the key itself): service_role/secret vs anon/publishable.
+    supabase/grants.sql assumes the backend uses the service_role (secret) key."""
+    import base64
+    k = SUPABASE_KEY or ""
+    if not k: return "not set"
+    if k.startswith("sb_secret_"):      return "service_role (secret key)"
+    if k.startswith("sb_publishable_"): return "anon (publishable key) — switch to the secret key"
+    try:
+        seg = k.split(".")[1]; seg += "=" * (-len(seg) % 4)
+        return json.loads(base64.urlsafe_b64decode(seg)).get("role", "unknown")
+    except Exception:
+        return "unknown"
+
 @app.route("/db-health")
 @require_auth
 def db_health():
@@ -2946,6 +2960,7 @@ def db_health():
             acks = r2.json()
             status_counts = Counter(a.get("status","") for a in acks)
             stats["acknowledgments"] = {"total": len(acks), "by_status": dict(status_counts)}
+        stats["supabase_key_role"] = _supabase_key_role()
         return jsonify({"success": True, "stats": stats, "timestamp": datetime.now(timezone.utc).isoformat()})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
@@ -4122,48 +4137,9 @@ def repair_severity():
     })
 
 
-@app.route("/apply-grants", methods=["GET"])
-def apply_grants():
-    """
-    Apply explicit Postgres grants required by Supabase from Oct 30, 2026.
-    Supabase is removing implicit grants — PostgREST needs explicit GRANT on all tables.
-    Run once before Oct 30, 2026:
-      GET /apply-grants?code=<ACCESS_CODE>
-
-    Reference: https://supabase.com/docs/guides/database/postgres/roles
-    """
-    provided = request.args.get("code","") or request.headers.get("X-Access-Code","")
-    if provided != ACCESS_CODE:
-        return jsonify({"error":"Unauthorised"}), 403
-    if not (SUPABASE_URL and SUPABASE_KEY):
-        return jsonify({"error":"Supabase not configured"}), 500
-
-    tables = [
-        "advisory_cache","acknowledgments","source_config","feed_metrics",
-        "advisory_history","sla_audit_log","saved_searches","cve_context_cache",
-        "cnx_stack_assets",
-    ]
-    results = {}
-    for table in tables:
-        sql = f"""
-        GRANT SELECT, INSERT, UPDATE, DELETE ON public.{table} TO anon, authenticated, service_role;
-        GRANT USAGE, SELECT ON SEQUENCE public.{table}_id_seq TO anon, authenticated, service_role;
-        """
-        try:
-            r = requests.post(
-                f"{SUPABASE_URL}/rest/v1/rpc/exec_sql",
-                headers={**supa_headers(), "Content-Type":"application/json"},
-                json={"query": sql}, timeout=15)
-            results[table] = "✅ granted" if r.status_code in (200,201,204) else f"⚠️ {r.status_code}"
-        except Exception as e:
-            results[table] = f"❌ {e}"
-
-    all_ok = all("✅" in v for v in results.values())
-    return jsonify({
-        "status": "complete" if all_ok else "partial",
-        "tables": results,
-        "note": "Run this before Oct 30, 2026 to avoid PostgREST access breaking on Supabase free tier."
-    })
+# /apply-grants removed: it granted anon full DML on every table (and failed on
+# tables without an _id_seq). One-time grants now live in supabase/grants.sql —
+# run it in the Supabase SQL Editor.
 
 
 @app.route("/create-indexes", methods=["GET"])
