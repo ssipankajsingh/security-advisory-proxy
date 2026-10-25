@@ -74,6 +74,10 @@ FEED_DISABLE_AFTER  = 10
 FEED_RETRY_AFTER_H  = 24
 
 # ─── SUPABASE ─────────────────────────────────────────────────────────────────
+def _pgq(value) -> str:
+    """URL-encode a value for a PostgREST filter (eq.<value>) — stops & / = / ? injection."""
+    return requests.utils.quote(str(value), safe="")
+
 def supa_headers(prefer="return=representation"):
     return {"apikey":SUPABASE_KEY,"Authorization":f"Bearer {SUPABASE_KEY}",
             "Content-Type":"application/json","Prefer":prefer}
@@ -2824,6 +2828,10 @@ def get_archive():
 @require_auth
 def get_cve_context(cve_id:str):
     if not (SUPABASE_URL and SUPABASE_KEY): return jsonify({"context":None})
+    # Strict format check — value is interpolated into a PostgREST filter
+    cve_id = cve_id.strip().upper()
+    if not re.fullmatch(r"CVE-\d{4}-\d{4,7}", cve_id):
+        return jsonify({"error":"Invalid CVE ID format"}), 400
     try:
         r=requests.get(f"{SUPABASE_URL}/rest/v1/cve_context_cache?cve_id=eq.{cve_id}&select=*",
                       headers=supa_headers(),timeout=8)
@@ -3050,6 +3058,30 @@ def clear_ack(advisory_id):
     return jsonify({"error":"Delete failed or not authorised — only the person who acknowledged can undo"}), 403
 
 # ─── CACHE MANAGEMENT ─────────────────────────────────────────────────────────
+def _is_public_http_url(url: str) -> bool:
+    """
+    SSRF guard: True only for http(s) URLs whose host resolves exclusively to
+    public IPs. Blocks loopback, private (10/172.16/192.168), link-local
+    (169.254.x — incl. Azure/AWS instance metadata), CGNAT, multicast, reserved.
+    """
+    import ipaddress, socket
+    from urllib.parse import urlparse
+    try:
+        p = urlparse(url)
+        if p.scheme not in ("http", "https") or not p.hostname:
+            return False
+        port = p.port or (443 if p.scheme == "https" else 80)
+        infos = socket.getaddrinfo(p.hostname, port, proto=socket.IPPROTO_TCP)
+        if not infos:
+            return False
+        for info in infos:
+            ip = ipaddress.ip_address(info[4][0].split("%")[0])
+            if not ip.is_global:
+                return False
+        return True
+    except Exception:
+        return False
+
 @app.route("/feed-check")
 @require_auth
 def feed_check():
@@ -3062,14 +3094,25 @@ def feed_check():
     url = request.args.get("url","").strip()
     if not url:
         return jsonify({"ok":False,"error":"No URL provided","item_count":0}), 400
-    if not url.startswith("http"):
-        return jsonify({"ok":False,"error":"Invalid URL","item_count":0}), 400
+    if not _is_public_http_url(url):
+        return jsonify({"ok":False,"error":"Invalid or non-public URL","item_count":0}), 400
 
     try:
-        resp = requests.get(url, timeout=12, headers={
+        hdrs = {
             "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept":"application/rss+xml,application/atom+xml,application/xml,text/xml,*/*",
-        }, allow_redirects=True)
+        }
+        # Follow redirects manually so each hop is re-checked — a public URL
+        # must not be able to 302 us into an internal address.
+        resp = None
+        for _ in range(4):
+            resp = requests.get(url, timeout=12, headers=hdrs, allow_redirects=False)
+            if resp.is_redirect and resp.headers.get("Location"):
+                url = requests.compat.urljoin(url, resp.headers["Location"])
+                if not _is_public_http_url(url):
+                    return jsonify({"ok":False,"error":"Redirected to a non-public URL","item_count":0}), 400
+                continue
+            break
         http_code = resp.status_code
         if resp.status_code >= 400:
             return jsonify({
@@ -4251,7 +4294,7 @@ def _load_api_key(key: str) -> dict | None:
         return None
     try:
         r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/api_keys?key=eq.{key}&is_active=eq.true&select=*",
+            f"{SUPABASE_URL}/rest/v1/api_keys?key=eq.{_pgq(key)}&is_active=eq.true&select=*",
             headers=supa_headers(), timeout=5)
         if r.status_code == 200 and r.json():
             row = r.json()[0]
@@ -4298,13 +4341,13 @@ def _record_usage_async(key: str, endpoint: str):
         try:
             # Read current total then increment — no SQL trigger needed
             r = requests.get(
-                f"{SUPABASE_URL}/rest/v1/api_keys?key=eq.{key}&select=total_requests",
+                f"{SUPABASE_URL}/rest/v1/api_keys?key=eq.{_pgq(key)}&select=total_requests",
                 headers=supa_headers(), timeout=5)
             current = 0
             if r.status_code == 200 and r.json():
                 current = r.json()[0].get("total_requests") or 0
             requests.patch(
-                f"{SUPABASE_URL}/rest/v1/api_keys?key=eq.{key}",
+                f"{SUPABASE_URL}/rest/v1/api_keys?key=eq.{_pgq(key)}",
                 headers={**supa_headers(), "Prefer": "return=minimal"},
                 json={"last_used_at": datetime.now(timezone.utc).isoformat(),
                       "total_requests": current + 1},
@@ -4997,7 +5040,7 @@ def admin_revoke_key(key_id):
     """Revoke (deactivate) an API key. Does not delete — keeps audit trail."""
     try:
         r = requests.patch(
-            f"{SUPABASE_URL}/rest/v1/api_keys?key=eq.{key_id}",
+            f"{SUPABASE_URL}/rest/v1/api_keys?key=eq.{_pgq(key_id)}",
             headers={**supa_headers(), "Prefer": "return=minimal"},
             json={"is_active": False}, timeout=10)
         # Evict from cache immediately
@@ -5016,7 +5059,7 @@ def admin_activate_key(key_id):
     """Re-activate a previously revoked key."""
     try:
         r = requests.patch(
-            f"{SUPABASE_URL}/rest/v1/api_keys?key=eq.{key_id}",
+            f"{SUPABASE_URL}/rest/v1/api_keys?key=eq.{_pgq(key_id)}",
             headers={**supa_headers(), "Prefer": "return=minimal"},
             json={"is_active": True}, timeout=10)
         _key_cache.pop(key_id, None)  # force cache refresh on next use
