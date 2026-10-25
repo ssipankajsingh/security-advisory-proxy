@@ -3,7 +3,10 @@ FROM python:3.11-slim
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    MALLOC_ARENA_MAX=2
+# MALLOC_ARENA_MAX: glibc otherwise creates a malloc arena per thread; with the
+# refresh thread pool that fragments memory and inflates RSS toward the 512 MB limit.
 
 COPY requirements.txt .
 RUN pip install -r requirements.txt

@@ -1523,10 +1523,14 @@ def dedupe_and_enrich(items:list) -> list:
             if src in ("exploit_db","zdi_published","zdi_upcoming"):
                 if a.get("exploit_refs"): ex["exploit_refs"] = a.get("exploit_refs","")
 
-            # Take patch status if we have none
-            if not ex.get("patch_status") or ex.get("patch_status") == "unknown":
-                if a.get("patch_status") and a["patch_status"] != "unknown":
-                    ex["patch_status"] = a["patch_status"]
+            # Patch status: most advanced status wins (available > workaround > no_fix > unknown).
+            # One vendor saying "no fix" for ITS products must not hide an upstream/distro fix.
+            # News articles are ignored — their keyword-inferred status is too noisy.
+            _rank = {"available":3, "workaround":2, "no_fix":1, "unknown":0}
+            new_ps = a.get("patch_status") or "unknown"
+            if not a.get("isNews") and _rank.get(new_ps,0) > _rank.get(ex.get("patch_status") or "unknown",0):
+                ex["patch_status"]        = new_ps
+                ex["patch_status_source"] = src
 
             # CWE: take first available
             if not ex.get("cwe") and a.get("cwe"):
@@ -2656,13 +2660,22 @@ def enrich_with_vulncheck(advisories: list) -> list:
     return advisories
 
 
+def _release_memory():
+    """gc + glibc malloc_trim: hand freed heap back to the OS so RSS falls after big phases."""
+    import gc, ctypes
+    gc.collect()
+    try: ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception: pass  # non-glibc (Windows/macOS/Alpine) — gc alone
+
 def fetch_all_advisories() -> list:
     results = []; futures = {}
     # Load source enabled/disabled config from Supabase (cached 5 min)
     # This makes enable/disable state shared across all browsers/users
     src_cfg    = supa_get_source_config()  # {source_id: bool}
     skip_count = 0
-    with ThreadPoolExecutor(max_workers=25) as executor:
+    # 8 not 25: each in-flight feed holds its raw body + feedparser tree; 25 at once
+    # pushed the 512 MB free instance over its limit (OOM-killed mid-refresh).
+    with ThreadPoolExecutor(max_workers=8) as executor:
         for key, url in TRUSTED_FEEDS.items():
             # Respect per-source enabled/disabled state from Supabase
             # If not in config at all, default to enabled (True)
@@ -2682,6 +2695,7 @@ def fetch_all_advisories() -> list:
             try: results.extend(future.result())
             except Exception as e: log.error(f"Thread error: {e}")
     if skip_count: log.info(f"[FETCH] Skipped {skip_count} disabled sources")
+    _release_memory()  # drop feed bodies/parse trees before enrichment
 
     # ── Sort BEFORE dedupe so OEM entries always win the dedup race ──
     sev_order = {"Critical":0,"High":1,"Medium":2,"Low":3,"Unknown":4}
@@ -2981,6 +2995,7 @@ def advisories():
                             log.error(f"[ADVISORIES] Background refresh failed: {e}")
                         finally:
                             _bg_refresh_running.clear()
+                            _release_memory()
                     threading.Thread(target=_bg_refresh, daemon=True).start()
                 elif should_refresh:
                     log.info("[ADVISORIES] Background refresh already running — skipping duplicate")
@@ -3946,6 +3961,7 @@ def _background_fetch_and_cache():
         log.error(f"[FETCH-NOW] ❌ Error: {e}")
     finally:
         _fetch_in_progress.clear()
+        _release_memory()
 
 @app.route("/repair-severity", methods=["GET","POST"])
 def repair_severity():
