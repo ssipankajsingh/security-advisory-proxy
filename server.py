@@ -2940,7 +2940,7 @@ def db_health():
         # advisory_cache stats
         r = requests.get(f"{SUPABASE_URL}/rest/v1/advisory_cache?select=id,published,severity,is_kev,is_zero_day&limit=15000",
                         headers={**supa_headers(),"Prefer":"count=exact"}, timeout=10)
-        if r.status_code == 200:
+        if r.status_code in (200, 206):   # 206 = partial page when Prefer: count=exact
             rows = r.json()
             total = int(r.headers.get("Content-Range","0").split("/")[-1]) if "Content-Range" in r.headers else len(rows)
             published_dates = [row.get("published","") for row in rows if row.get("published")]
@@ -2956,10 +2956,11 @@ def db_health():
         # acknowledgments stats
         r2 = requests.get(f"{SUPABASE_URL}/rest/v1/acknowledgments?select=id,status&limit=1000",
                          headers={**supa_headers(),"Prefer":"count=exact"}, timeout=10)
-        if r2.status_code == 200:
+        if r2.status_code in (200, 206):
             acks = r2.json()
             status_counts = Counter(a.get("status","") for a in acks)
-            stats["acknowledgments"] = {"total": len(acks), "by_status": dict(status_counts)}
+            ack_total = int(r2.headers.get("Content-Range","0/0").split("/")[-1] or len(acks)) if "/" in r2.headers.get("Content-Range","") else len(acks)
+            stats["acknowledgments"] = {"total": ack_total, "sampled": len(acks), "by_status (sample)": dict(status_counts)}
         stats["supabase_key_role"] = _supabase_key_role()
         return jsonify({"success": True, "stats": stats, "timestamp": datetime.now(timezone.utc).isoformat()})
     except Exception as e:
