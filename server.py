@@ -115,11 +115,28 @@ def supa_record_feed_metrics(source_id:str, item_count:int, items:list,
     except Exception as e:
         log.debug(f"[feed_metrics] {e}")
 
+def _supa_get_all(table: str, select: str = "*", order: str = "id.asc", page: int = 1000, timeout: int = 15) -> list:
+    """Read every row of a table. Supabase caps each response at 1000 rows (max-rows),
+    so a single GET silently truncates — page with limit/offset on a stable order."""
+    rows, offset = [], 0
+    while True:
+        r = requests.get(f"{SUPABASE_URL}/rest/v1/{table}?select={select}&order={order}&limit={page}&offset={offset}",
+                         headers=supa_headers(), timeout=timeout)
+        if r.status_code not in (200, 206):
+            log.warning(f"[SUPABASE] {table} page offset={offset}: HTTP {r.status_code} — returning {len(rows)} rows")
+            break
+        batch = r.json()
+        rows.extend(batch)
+        if len(batch) < page:
+            break
+        offset += len(batch)
+    return rows
+
 def supa_get_acks() -> dict:
     if not (SUPABASE_URL and SUPABASE_KEY): return {}
     try:
-        r = requests.get(f"{SUPABASE_URL}/rest/v1/acknowledgments?select=*", headers=supa_headers(), timeout=8)
-        if r.status_code == 200:
+        rows = _supa_get_all("acknowledgments")
+        if rows:
             return {row["id"]:{
                 "by":          row["acknowledged_by"],
                 "at":          row["acknowledged_at"],
@@ -127,7 +144,7 @@ def supa_get_acks() -> dict:
                 "status":      row.get("status","In Review"),
                 "assigned_to": row.get("assigned_to",""),
                 "ai_triage":   row.get("ai_triage",""),
-            } for row in r.json()}
+            } for row in rows}
     except Exception as e: log.error(f"[SUPABASE] get_acks: {e}")
     return {}
 
@@ -255,8 +272,7 @@ def _check_kev_due_alerts():
                       headers=supa_headers(),timeout=10)
         if r.status_code!=200: return
         items=[row["data"] for row in r.json() if row.get("data")]
-        ar=requests.get(f"{SUPABASE_URL}/rest/v1/acknowledgments?select=id,status",headers=supa_headers(),timeout=8)
-        patched={a["id"] for a in (ar.json() if ar.status_code==200 else []) if a.get("status") in ("Patched","Accepted Risk","False Positive")}
+        patched={a["id"] for a in _supa_get_all("acknowledgments","id,status") if a.get("status") in ("Patched","Accepted Risk","False Positive")}
         now_dt=datetime.now(timezone.utc); alerts=[]
         for item in items:
             due=item.get("kev_due_date","")
