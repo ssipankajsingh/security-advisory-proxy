@@ -1000,10 +1000,14 @@ def match_cnx_stack(advisory: dict) -> dict:
 
 # ─── TRUSTED FEED REGISTRY ───────────────────────────────────────────────────
 TRUSTED_FEEDS = {
+    # Removed 2026-10-30 — no working official feed (CVEs still arrive via the CVE List,
+    # where each vendor is the CNA): adobe (bulletins moved to Trust Center, email only),
+    # android, checkpoint, schneider_ics, trellix (no RSS), forescout (403 to cloud IPs),
+    # openssl (site feed mixes news), cvedaily_critical (domain gone), secureworks
+    # (blog, acquired by Sophos), bleeping (403 to cloud IPs; other news feeds cover it).
 
     # ══ TIER 0: MASTER AGGREGATORS — pre-NVD sources for fast CVE response ═
     "cvefeed_high_critical": "https://cvefeed.io/rssfeed/severity/high.xml",
-    "cvedaily_critical":     "https://cvedaily.com/feed-critical.xml",   # critical only — cvedaily_all/new removed (duplication)
     # PRE-NVD: these publish CVEs hours–days before NIST NVD enriches them
     "ghsa":          "__GHSA_API__",       # GitHub Advisory Database API
     "osv":           "__OSV_API__",        # Google OSV.dev API
@@ -1034,7 +1038,6 @@ TRUSTED_FEEDS = {
     "ms_azure":  "https://azurecomcdn.azureedge.net/en-us/updates/feed/",          # Azure Updates (security tagged)
     "apple":     "https://support.apple.com/en-in/rss/securityupdates.rss",
     "ubuntu":    "https://ubuntu.com/security/notices/rss.xml",
-    "android":   "https://source.android.com/docs/security/bulletin/feed.xml",     # Fixed: was security blog, now bulletin feed
     "redhat":    "https://access.redhat.com/security/security-updates/security-advisories.rss",
     "debian":    "https://www.debian.org/security/dsa-long",
 
@@ -1043,18 +1046,16 @@ TRUSTED_FEEDS = {
     "fortinet":  "https://www.fortiguard.com/rss/ir.xml",
     "paloalto":  "https://security.paloaltonetworks.com/rss.xml",
     "sonicwall": "https://psirt.global.sonicwall.com/vuln-list",                   # Fixed: was blog, now PSIRT
-    "ivanti":    "https://forums.ivanti.com/s/article/Ivanti-Security-Advisories",  # No RSS — fetched via HTML scrape fallback
+    "ivanti":    "https://www.ivanti.com/blog/topics/security-advisory/rss",
     "f5":        "https://support.f5.com/rss/security-advisories.xml",
-    "checkpoint":"https://advisories.checkpoint.com/feeds.xml",                     # Fixed: was research blog
-    "juniper":   "https://supportportal.juniper.net/s/feed/0D5i000000pN0CRCA0",
+    "juniper":   "https://supportportal.juniper.net/knowledgerss?type=Security",
     "citrix":    "https://support.citrix.com/feed/news",
     "aruba":     "https://support.hpe.com/hpesc/public/home/rss?docType=Security+Bulletin&sort=modified",
     "zyxel":     "https://www.zyxel.com/global/en/support/security-advisories/rss",
 
     # ══ ENDPOINT SECURITY ════════════════════════════════════════════════════
-    "sophos":        "https://www.sophos.com/en-us/security-advisories.xml",
+    "sophos":        "https://www.sophos.com/en-us/security-advisories/feed",
     "trendmicro":    "https://success.trendmicro.com/dcx/s/feed/advisories?language=en_US",  # Fixed: was feedburner blog
-    "trellix":       "https://www.trellix.com/en-us/rss/security-advisories.xml",
     "crowdstrike_blog": "https://www.crowdstrike.com/blog/feed/",
 
     # ══ CLOUD & INFRASTRUCTURE ═══════════════════════════════════════════════
@@ -1064,9 +1065,8 @@ TRUSTED_FEEDS = {
 
     # ══ MIDDLEWARE / DB / OPEN SOURCE ════════════════════════════════════════
     "mozilla":  "https://blog.mozilla.org/security/feed/",
-    "openssl":  "https://www.openssl.org/news/secadv/rss.xml",                      # Fixed: was HTML page
     "apache":   "https://blogs.apache.org/security/feed/entries/rss",
-    "oracle":   "https://www.oracle.com/security-alerts/rss.xml",                   # Fixed: was CERT/CC
+    "oracle":   "https://www.oracle.com/ocom/groups/public/@otn/documents/webcontent/rss-otn-sec.xml",
     "vmware":   "https://community.broadcom.com/blogs/rss/4",
     "splunk":   "https://advisory.splunk.com/feed.xml",
     "veeam":    "https://www.veeam.com/rss/security-advisories.xml",
@@ -1074,15 +1074,12 @@ TRUSTED_FEEDS = {
 
     # ══ ENTERPRISE APPS (NEW) ════════════════════════════════════════════════
     "sap":       "https://dam.sap.com/mac/app/e/rss/link.htm?fid=73554900100800001281",  # SAP Security Notes RSS
-    "adobe":     "https://helpx.adobe.com/security/security-bulletin.rss",               # Adobe PSIRT
-    "atlassian": "https://confluence.atlassian.com/security/rss.xml",                    # Atlassian Security Advisories
-    "gitlab":    "https://about.gitlab.com/security/feed.xml",                           # GitLab Security Releases
+    "atlassian": "https://jira.atlassian.com/sr/jira.issueviews:searchrequest-rss/temp/SearchRequest.xml?jqlQuery=labels+%3D+advisory+ORDER+BY+created+DESC&tempMax=50",
+    "gitlab":    "https://about.gitlab.com/security-releases.xml",
     "solarwinds":"https://www.solarwinds.com/shared-content/rss-feed/solarwinds-cve-rss-feed.xml",
-    "forescout": "https://www.forescout.com/resources/feed/?type=advisory",
 
     # ══ ICS / OT (NEW) ═══════════════════════════════════════════════════════
     "siemens_ics":      "https://cert-portal.siemens.com/productcert/rss/advisories.atom",  # Siemens ProductCERT
-    "schneider_ics":    "https://download.schneider-electric.com/files?p_Doc_Ref=SEVD-RSS",  # Schneider Electric PSIRT
 
     # ══ YOUR STACK ═══════════════════════════════════════════════════════════
     "proofpoint": "https://www.proofpoint.com/us/rss.xml",
@@ -1092,12 +1089,10 @@ TRUSTED_FEEDS = {
     "talos":       "https://feeds.feedburner.com/feedburner/Talos",
     "unit42":      "https://unit42.paloaltonetworks.com/feed/",
     "msft_ti":     "https://www.microsoft.com/en-us/security/blog/feed/",
-    "secureworks": "https://www.secureworks.com/rss?feed=blog",
     "recorded_fut":"https://therecord.media/feed/",
 
     # ══ NEWS & COMMUNITY ══════════════════════════════════════════════════════
     "krebs":        "https://krebsonsecurity.com/feed/",
-    "bleeping":     "https://www.bleepingcomputer.com/feed/",
     "hackernews":   "https://feeds.feedburner.com/TheHackersNews",
     "securityweek": "https://www.securityweek.com/feed/",
     "darkreading":  "https://www.darkreading.com/rss.xml",
@@ -2340,115 +2335,139 @@ def fetch_mitre_cve() -> list:
         return []
 
 
+_CVELIST_WINDOW_H   = 6      # look back this far each run (cron runs every 30 min)
+_CVELIST_MAX_FILES  = 300    # per run; ~490 new CVEs/day ≈ 125 per 6h window
+_cvelist_seen: dict = {}     # cve_id -> unix ts fetched (skip refetch within the window)
+
+def _parse_cve5(d: dict, now_iso: str):
+    """One CVE JSON 5 record -> advisory dict (None if unusable)."""
+    meta = d.get("cveMetadata", {})
+    cna  = d.get("containers", {}).get("cna", {})
+    adps = d.get("containers", {}).get("adp", []) or []
+    cve_id = meta.get("cveId", "")
+    if not cve_id.startswith("CVE-") or meta.get("state") == "REJECTED":
+        return None
+    descs   = cna.get("descriptions", [])
+    desc_en = next((x["value"] for x in descs if x.get("lang", "").startswith("en")), "")
+    title   = desc_en[:120] if desc_en else cve_id
+
+    def _first_cvss(metrics):
+        for m in metrics or []:
+            for k in ("cvssV3_1", "cvssV3_0", "cvssV4_0", "cvssV2_0"):
+                cv = m.get(k, {})
+                if isinstance(cv, dict) and cv.get("baseScore"):
+                    return cv["baseScore"], (cv.get("baseSeverity", "") or "").capitalize()
+        return None, ""
+    # CVSS: vendor (CNA) first, then CISA ADP "vulnrichment" when the vendor gave none
+    cvss_score, severity = _first_cvss(cna.get("metrics"))
+    for adp in adps:
+        if cvss_score: break
+        cvss_score, severity = _first_cvss(adp.get("metrics"))
+    if cvss_score and severity in ("", "Unknown", "None"):
+        severity = _cvss_tier(float(cvss_score))
+    severity = severity or "Unknown"
+
+    # CISA ADP SSVC: "Exploitation: active" = exploited in the wild
+    exploitation = ""
+    for adp in adps:
+        for m in adp.get("metrics", []) or []:
+            for opt in ((m.get("other") or {}).get("content") or {}).get("options", []) or []:
+                if isinstance(opt, dict) and "Exploitation" in opt:
+                    exploitation = str(opt["Exploitation"]).lower()
+    affected = cna.get("affected", [])
+    products = [f"{a.get('vendor','')} {a.get('product','')}".strip() for a in affected[:5] if a.get("product")]
+    vendor   = affected[0].get("vendor", "") if affected else ""
+    cwe = ""
+    for pt in cna.get("problemTypes", []):
+        for dx in pt.get("descriptions", []):
+            if dx.get("cweId", "").startswith("CWE-"):
+                cwe = dx["cweId"]; break
+        if cwe: break
+    pub = meta.get("datePublished") or meta.get("dateUpdated") or now_iso
+    if not is_within_window(pub):
+        return None
+    tags = ["CVEList"] + (["exploited"] if exploitation == "active" else
+                          ["poc-public"] if exploitation == "poc" else [])
+    return {
+        "id": cve_id, "title": title[:200], "summary": desc_en[:400],
+        "description": desc_en[:1000], "cve": cve_id, "cves": [cve_id],
+        "link": f"https://www.cve.org/CVERecord?id={cve_id}",
+        "url":  f"https://www.cve.org/CVERecord?id={cve_id}",
+        "published": pub, "severity": severity, "cvss": cvss_score,
+        "zeroDay": exploitation == "active", "exploitation": exploitation or None,
+        "source": "cvelist_github",
+        "vendor": normalise_vendor(vendor) if vendor else "MITRE",
+        "products": products, "author": "", "tags": tags,
+        "isOEM": False, "isNews": False, "fetched_at": now_iso,
+        "cwe": cwe, "patch_status": _cve5_patch_status(cna, meta.get("assignerShortName", "")),
+        "cna": meta.get("assignerShortName", ""),
+    }
+
+def _cve5_path(cve_id: str) -> str:
+    """CVE-2026-62001 -> cves/2026/62xxx/CVE-2026-62001.json"""
+    _, year, num = cve_id.split("-")
+    return f"cves/{year}/{num[:-3]}xxx/{cve_id}.json"
+
 def fetch_cvelist_github() -> list:
     """
-    Fetch recent CVEs from CVEProject/cvelistV5 on GitHub.
-    MITRE publishes ALL CVEs here within 1-2h of CNA assignment —
-    much faster than NVD (12-24h) or vendor RSS feeds.
-    Covers ALL vendors: Microsoft, Cisco, Fortinet, Apple, Linux etc.
-    Requires GITHUB_TOKEN for reliable rate limits (60->5000 req/hr).
+    New CVEs from CVEProject/cvelistV5 — every CNA (vendor) publishes here first,
+    so this also covers vendors with no RSS feed (Adobe, Check Point, Android,
+    Schneider, Trellix…). Commit messages list every new CVE ID ("N new CVEs: …"),
+    so one API call per run finds them all; previously 8 commits / 80 files per
+    run captured only ~30-45% of the ~490 new CVEs a day.
     """
     with cache_lock:
         if "cvelist_github" in cache: return cache["cvelist_github"]
     try:
         gh_headers = {
-            "User-Agent":         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124",
-            "Accept":             "application/vnd.github+json",
-            "X-GitHub-Api-Version":"2022-11-28",
+            "User-Agent":          "SecurityAdvisoryProxy/2.0",
+            "Accept":              "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
         }
         if os.getenv("GITHUB_TOKEN"):
             gh_headers["Authorization"] = f"Bearer {os.getenv('GITHUB_TOKEN')}"
+        now = time.time()
+        for k in [k for k, ts in _cvelist_seen.items() if now - ts > _CVELIST_WINDOW_H * 3600]:
+            _cvelist_seen.pop(k, None)
 
-        # Get commits from last 48h to find recently added/modified CVE files
-        since = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        since = (datetime.now(timezone.utc) - timedelta(hours=_CVELIST_WINDOW_H)).strftime("%Y-%m-%dT%H:%M:%SZ")
         commits_r = requests.get(
-            f"https://api.github.com/repos/CVEProject/cvelistV5/commits?path=cves&since={since}&per_page=20",
-            headers=gh_headers, timeout=15)
+            f"https://api.github.com/repos/CVEProject/cvelistV5/commits?path=cves&since={since}&per_page=100",
+            headers=gh_headers, timeout=20)
         if commits_r.status_code == 403:
             log.warning("[cvelist_github] Rate limited — add GITHUB_TOKEN env var")
             return []
         commits_r.raise_for_status()
-        commits = commits_r.json()
-        if not commits:
-            log.info("[cvelist_github] No new CVE commits in last 48h"); return []
+        new_ids = []
+        for c in commits_r.json():
+            msg = (c.get("commit") or {}).get("message", "")
+            if "new CVEs:" in msg:
+                section = msg.split("new CVEs:", 1)[1].split("updated CVEs", 1)[0]
+                new_ids += re.findall(r"CVE-\d{4}-\d{4,7}", section)
+        todo = [i for i in dict.fromkeys(new_ids) if i not in _cvelist_seen][:_CVELIST_MAX_FILES]
+        log.info(f"[cvelist_github] {len(new_ids)} new CVEs in last {_CVELIST_WINDOW_H}h, {len(todo)} to fetch")
 
-        # Collect unique CVE file paths from recent commits
-        cve_files = set()
-        for commit in commits[:8]:
-            sha = commit.get("sha",""); 
-            if not sha: continue
-            dr = requests.get(f"https://api.github.com/repos/CVEProject/cvelistV5/commits/{sha}",
-                             headers=gh_headers, timeout=10)
-            if dr.status_code != 200: continue
-            for f in dr.json().get("files",[]):
-                fn = f.get("filename","")
-                if fn.startswith("cves/") and fn.endswith(".json"):
-                    cve_files.add(fn)
-
-        log.info(f"[cvelist_github] {len(cve_files)} new/modified CVE files found")
-        items = []; now_iso = datetime.now(timezone.utc).isoformat()
-
-        for fpath in list(cve_files)[:80]:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        def _one(cve_id):
             try:
-                raw_r = requests.get(
-                    f"https://raw.githubusercontent.com/CVEProject/cvelistV5/main/{fpath}",
-                    headers={"User-Agent":"Mozilla/5.0"}, timeout=8)
-                if raw_r.status_code != 200: continue
-                d = raw_r.json()
-                meta = d.get("cveMetadata",{})
-                cna  = d.get("containers",{}).get("cna",{})
-                cve_id = meta.get("cveId","")
-                if not cve_id.startswith("CVE-"): continue
-                # Description
-                descs  = cna.get("descriptions",[])
-                desc_en = next((x["value"] for x in descs if x.get("lang","").startswith("en")),"" )
-                title  = desc_en[:120] if desc_en else cve_id
-                # CVSS
-                cvss_score = None; severity = "Unknown"
-                for m in cna.get("metrics",[]):
-                    for cv_key in ["cvssV3_1","cvssV3_0","cvssV4_0","cvssV2_0"]:
-                        cv = m.get(cv_key,{})
-                        if isinstance(cv,dict) and cv.get("baseScore"):
-                            cvss_score = cv["baseScore"]
-                            sev = cv.get("baseSeverity","").capitalize()
-                            if sev: severity = sev
-                            break
-                    if cvss_score: break
-                if cvss_score and (not severity or severity=="Unknown"):
-                    severity = ("Critical" if cvss_score>=9 else
-                                "High"     if cvss_score>=7 else
-                                "Medium"   if cvss_score>=4 else "Low")
-                # Products + vendor
-                affected = cna.get("affected",[])
-                products = [f"{a.get('vendor','')} {a.get('product','')}".strip()
-                            for a in affected[:5] if a.get("product")]
-                vendor = affected[0].get("vendor","") if affected else ""
-                # CWE
-                cwe = ""
-                for pt in cna.get("problemTypes",[]):
-                    for dx in pt.get("descriptions",[]):
-                        if dx.get("cweId","").startswith("CWE-"):
-                            cwe = dx["cweId"]; break
-                    if cwe: break
-                # Published date
-                pub = meta.get("datePublished") or meta.get("dateUpdated") or now_iso
-                if not is_within_window(pub): continue
-                items.append({
-                    "id":cve_id,"title":title[:200],"summary":desc_en[:400],
-                    "description":desc_en[:1000],"cve":cve_id,"cves":[cve_id],
-                    "link":f"https://www.cve.org/CVERecord?id={cve_id}",
-                    "url":f"https://www.cve.org/CVERecord?id={cve_id}",
-                    "published":pub,"severity":severity,"cvss":cvss_score,
-                    "zeroDay":False,"source":"cvelist_github",
-                    "vendor":normalise_vendor(vendor) if vendor else "MITRE",
-                    "products":products,"author":"","tags":["CVEList"],
-                    "isOEM":False,"isNews":False,"fetched_at":now_iso,
-                    "cwe":cwe,"patch_status":_cve5_patch_status(cna, meta.get("assignerShortName","")),
-                })
-            except Exception as e: log.debug(f"[cvelist_github] {fpath}: {e}"); continue
+                r = requests.get(f"https://raw.githubusercontent.com/CVEProject/cvelistV5/main/{_cve5_path(cve_id)}",
+                                 headers={"User-Agent": "SecurityAdvisoryProxy/2.0"}, timeout=10)
+                if r.status_code != 200:
+                    return cve_id, None, False
+                return cve_id, _parse_cve5(r.json(), now_iso), True
+            except Exception as e:
+                log.debug(f"[cvelist_github] {cve_id}: {e}")
+                return cve_id, None, False
+        items = []
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            for cve_id, adv, ok in ex.map(_one, todo):
+                if ok:
+                    _cvelist_seen[cve_id] = now      # fetched (even if filtered out) — don't refetch
+                if adv:
+                    items.append(adv)
 
         with cache_lock: cache["cvelist_github"] = items
-        log.info(f"[cvelist_github] ✅ {len(items)} CVEs from CVEProject/cvelistV5")
+        log.info(f"[cvelist_github] ✅ {len(items)} CVEs ({sum(1 for a in items if a['zeroDay'])} exploited per CISA SSVC)")
         threading.Thread(target=supa_record_feed_metrics,
             args=("cvelist_github",len(items),items,True,"",0),daemon=True).start()
         return items
