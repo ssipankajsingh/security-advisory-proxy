@@ -646,6 +646,15 @@ def supa_load_advisory_cache(bypass_mem_cache: bool = False) -> list:
             seen_ids.add(iid); deduped.append(item)
     if len(deduped) < len(all_items):
         log.info(f"[SUPABASE] Deduped on load: {len(all_items)} → {len(deduped)} items")
+    # Re-tag CNX matches on every load (~1s for 8K rows) so rule changes apply to stored
+    # rows that no longer appear in any feed, not just to freshly fetched ones.
+    for item in deduped:
+        cnx = match_cnx_stack(item)
+        item["cnxStack"]       = cnx.get("matched", False)
+        item["cnxTier"]        = cnx.get("tier", "")
+        item["cnxEol"]         = cnx.get("eol", False)
+        item["cnxEolProducts"] = cnx.get("eol_products", [])
+        item["cnxVendors"]     = cnx.get("vendors", [])
     # ── Populate in-memory cache ───────────────────────────────────────────────
     if deduped:
         with _mem_advisory_lock:
@@ -897,18 +906,36 @@ CNX_STACK = {
 
 # Flat lookup: normalised keyword → (vendor_key, tier, eol_list)
 # Built once at startup for O(1) matching during advisory processing
-_CNX_VENDOR_KEYWORDS: dict = {}
+_CNX_VENDOR_KEYWORDS: dict = {}   # keyword/alias -> vendor_key
 _CNX_PRODUCT_KEYWORDS: list = []  # list of (keyword_lower, vendor_key, is_eol)
 
+# Product names that are also everyday words or generic terms. On their own they matched
+# "WordPress", "Edge Decor", "gain access", "security teams", Maven "Java" packages,
+# Windows "kernel"… — so they only count when their vendor is named in the same text.
+_CNX_AMBIGUOUS = {
+    "word", "edge", "access", "teams", "excel", "outlook", "publisher", "visio",
+    "onenote", "onedrive", "powerpoint", "horizon", "prisma", "eos", "ios",
+    "java", "kernel", "hana", "nfs", "cifs", "self-service",
+}
+
+# Feed ids / spellings that also name a CNX vendor (e.g. the "paloalto" feed)
+_CNX_VENDOR_ALIASES = {"palo alto": ["paloalto", "palo-alto"], "microsoft": ["msrc"], "crowdstrike": ["crowdstrike_blog"]}
+
 def _build_cnx_lookup():
+    """One combined whole-word regex over every vendor/alias/product keyword.
+    Scanning each text once is far faster than one regex per keyword."""
+    global _CNX_RX
     for vendor_key, info in CNX_STACK.items():
-        # Vendor name itself
-        _CNX_VENDOR_KEYWORDS[vendor_key.lower()] = vendor_key
+        for name in [vendor_key.lower()] + _CNX_VENDOR_ALIASES.get(vendor_key, []):
+            _CNX_VENDOR_KEYWORDS[name] = vendor_key
         for prod in info["products"]:
-            is_eol = prod in info.get("eol_products", [])
-            _CNX_PRODUCT_KEYWORDS.append((prod.lower(), vendor_key, is_eol))
+            _CNX_PRODUCT_KEYWORDS.append((prod.lower(), vendor_key, prod in info.get("eol_products", [])))
         for prod in info.get("eol_products", []):
             _CNX_PRODUCT_KEYWORDS.append((prod.lower(), vendor_key, True))
+    # longest first so "ios xe" wins over "ios" at the same position
+    kws = sorted(set(_CNX_VENDOR_KEYWORDS) | {k for k, _, _ in _CNX_PRODUCT_KEYWORDS}, key=len, reverse=True)
+    _CNX_RX = re.compile(r"(?<![a-z0-9])(" + "|".join(map(re.escape, kws)) + r")(?![a-z0-9])")
+_CNX_RX = None
 _build_cnx_lookup()
 
 
@@ -931,21 +958,25 @@ def match_cnx_stack(advisory: dict) -> dict:
     is_eol = False
     eol_products = []
 
-    # Check vendor-level match first (fast)
-    adv_vendor = (advisory.get("vendor") or "").lower()
-    for keyword, vendor_key in _CNX_VENDOR_KEYWORDS.items():
-        if keyword in adv_vendor or keyword in text:
-            matched_vendors.add(vendor_key)
-            matched_tier = CNX_STACK[vendor_key]["tier"]
+    found = {m.group(1) for m in _CNX_RX.finditer(text)}   # whole-word hits only
 
-    # Check product-level match (more precise)
+    # Vendor-level match
+    named_vendors = {_CNX_VENDOR_KEYWORDS[k] for k in found if k in _CNX_VENDOR_KEYWORDS}
+    for vendor_key in named_vendors:
+        matched_vendors.add(vendor_key)
+        matched_tier = CNX_STACK[vendor_key]["tier"]
+
+    # Product-level match (ambiguous names need their vendor named too)
     for prod_kw, vendor_key, prod_eol in _CNX_PRODUCT_KEYWORDS:
-        if prod_kw in text:
-            matched_vendors.add(vendor_key)
-            matched_tier = CNX_STACK[vendor_key]["tier"]
-            if prod_eol:
-                is_eol = True
-                eol_products.append(prod_kw)
+        if prod_kw not in found:
+            continue
+        if prod_kw in _CNX_AMBIGUOUS and vendor_key not in named_vendors:
+            continue
+        matched_vendors.add(vendor_key)
+        matched_tier = CNX_STACK[vendor_key]["tier"]
+        if prod_eol:
+            is_eol = True
+            eol_products.append(prod_kw)
 
     # Special: Log4j is critical — always flag
     if "log4j" in text or "log4shell" in text or "cve-2021-44228" in (advisory.get("cve") or "").lower():
