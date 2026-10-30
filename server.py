@@ -649,6 +649,7 @@ def supa_load_advisory_cache(bypass_mem_cache: bool = False) -> list:
     # Re-tag CNX matches on every load (~1s for 8K rows) so rule changes apply to stored
     # rows that no longer appear in any feed, not just to freshly fetched ones.
     for item in deduped:
+        reconcile_advisory(item)
         cnx = match_cnx_stack(item)
         item["cnxStack"]       = cnx.get("matched", False)
         item["cnxTier"]        = cnx.get("tier", "")
@@ -2442,7 +2443,7 @@ def fetch_cvelist_github() -> list:
                     "vendor":normalise_vendor(vendor) if vendor else "MITRE",
                     "products":products,"author":"","tags":["CVEList"],
                     "isOEM":False,"isNews":False,"fetched_at":now_iso,
-                    "cwe":cwe,"patch_status":"unknown",
+                    "cwe":cwe,"patch_status":_cve5_patch_status(cna, meta.get("assignerShortName","")),
                 })
             except Exception as e: log.debug(f"[cvelist_github] {fpath}: {e}"); continue
 
@@ -2737,6 +2738,106 @@ def enrich_with_vulncheck(advisories: list) -> list:
     return advisories
 
 
+# ─── RECONCILE (runs after enrichment and on every cache load) ───────────────
+# VulDB (and some aggregators) put structured metadata in RSS categories, which
+# extract_products() turns into products like "Risk: critical", "Remote: Yes".
+_PRODUCT_META_KEYS = {"vendor", "product", "risk", "physical", "local", "remote",
+                      "exploit", "countermeasures", "countermeasure", "cvss", "cve", "vuldb"}
+_KEV_SOURCES = ("CISA KEV", "cisa_kev", "vulncheck_kev")
+# VulDB's RSS risk scale is problematic / critical / very critical — its "critical" is a
+# mid tier, not CVSS Critical. Mapped conservatively: VulDB alone never yields Critical;
+# NVD CVSS (when it arrives) decides.
+_SOURCE_RISK_SEV = {"problematic": "Low", "critical": "Medium", "very critical": "High"}
+
+def _cvss_tier(score: float) -> str:
+    return "Critical" if score >= 9 else "High" if score >= 7 else "Medium" if score >= 4 else "Low"
+
+def reconcile_advisory(a: dict) -> dict:
+    """Make fields consistent. Idempotent — safe on fresh and stored rows."""
+    # 1. Split "Key: Value" metadata out of products
+    meta, clean = {}, []
+    for p in (a.get("products") or []):
+        p = str(p).strip()
+        m = re.match(r"^([A-Za-z ]{2,20}):\s*(.*)$", p)
+        if m and m.group(1).strip().lower() in _PRODUCT_META_KEYS:
+            meta[m.group(1).strip().lower()] = m.group(2).strip()
+            continue
+        if p and p.upper() != "CVE":
+            clean.append(p)
+    if meta:
+        if meta.get("product"):
+            name = f"{meta.get('vendor', '')} {meta['product']}".strip()
+            if name not in clean:
+                clean.insert(0, name)
+        a["products"] = clean
+        if meta.get("risk"):
+            a["source_risk"] = meta["risk"].lower()
+        cm = meta.get("countermeasures") or meta.get("countermeasure")
+        if cm:
+            a["countermeasure"] = cm
+        # source id ("vuldb") was standing in for the vendor
+        if meta.get("vendor") and (a.get("vendor") or "").lower() in ("", (a.get("source") or "").lower()):
+            a["vendor"] = normalise_vendor(meta["vendor"])
+    elif a.get("products") and len(clean) != len(a["products"]):
+        a["products"] = clean
+
+    # 2. Patch status from structured hints (only when nothing better is known)
+    if (a.get("patch_status") or "unknown") == "unknown":
+        cm = (a.get("countermeasure") or "").lower()
+        if "upgrade" in cm or "patch" in cm:
+            a["patch_status"], a["patch_status_source"] = "available", "countermeasure"
+        elif "workaround" in cm:
+            a["patch_status"], a["patch_status_source"] = "workaround", "countermeasure"
+        elif (a.get("vendor") or "").lower().startswith("oracle") and \
+                a.get("source") in ("cvelist_github", "mitre_cve", "vulncheck_nvd"):
+            # Oracle publishes CVEs only in its Critical Patch Update / Security Alerts,
+            # which ship the fix at the same time.
+            a["patch_status"], a["patch_status_source"] = "available", "oracle_cpu"
+
+    # 3. Severity: CVSS decides when present (KEV stays Critical — active exploitation)
+    sev = a.get("severity") or "Unknown"
+    is_kev = bool(a.get("isKev")) or a.get("source") in _KEV_SOURCES or "KEV" in (a.get("tags") or [])
+    try:
+        score = float(a["cvss"]) if a.get("cvss") not in (None, "") else None
+    except (TypeError, ValueError):
+        score = None
+    if score is not None and 0 < score <= 10:
+        tier = _cvss_tier(score)
+        if tier != sev and not (is_kev and sev == "Critical"):
+            a.setdefault("severity_label", sev)
+            a["severity"] = tier
+    elif a.get("source_risk") in _SOURCE_RISK_SEV and a.get("source") == "vuldb" and not is_kev:
+        # No CVSS yet: VulDB's own risk rating beats keyword guessing on the text
+        rs = _SOURCE_RISK_SEV[a["source_risk"]]
+        if rs != sev:
+            a.setdefault("severity_label", sev)
+            a["severity"] = rs
+    return a
+
+
+def _cve5_patch_status(cna: dict, assigner: str) -> str:
+    """Patch status from a CVE JSON 5 record: patch-tagged reference, a fixed
+    version (lessThan / unaffected), solution text, or an Oracle CPU CNA."""
+    if any("patch" in (t or "").lower() for r in cna.get("references", []) for t in r.get("tags", [])):
+        return "available"
+    for af in cna.get("affected", []):
+        for v in af.get("versions", []):
+            if v.get("status") == "affected" and v.get("lessThan") and v.get("lessThan") not in ("*", "n/a"):
+                return "available"
+            if v.get("status") == "unaffected" and v.get("version") not in (None, "", "0", "n/a"):
+                return "available"
+            if any(c.get("status") == "unaffected" for c in v.get("changes", [])):
+                return "available"
+    sol = " ".join(s.get("value", "") for s in cna.get("solutions", []))
+    if sol:
+        ps = _infer_patch_status(sol)
+        if ps != "unknown":
+            return ps
+    if (assigner or "").lower() == "oracle":
+        return "available"
+    return "unknown"
+
+
 def _release_memory():
     """gc + glibc malloc_trim: hand freed heap back to the OS so RSS falls after big phases."""
     import gc, ctypes
@@ -2802,6 +2903,7 @@ def fetch_all_advisories() -> list:
     # Final CNX Stack pass — re-run after enrichment fills in vendor/product fields
     cnx_count = 0
     for a in results:
+        reconcile_advisory(a)        # severity/CVSS, products metadata, patch hints
         cnx = match_cnx_stack(a)
         a["cnxStack"]       = cnx.get("matched", False)
         a["cnxTier"]        = cnx.get("tier", "")
