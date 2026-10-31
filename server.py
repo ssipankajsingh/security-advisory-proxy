@@ -56,17 +56,19 @@ _feed_disabled:dict = {}  # {key: disabled_until_unix_ts}
 # it has been failing, why. In memory — resets on restart (reported as tracking_since).
 _feed_health:dict = {}    # {key: {last_attempt_at, last_success_at, failing_since, consecutive_failures, last_error, insecure_tls}}
 
-def _note_feed(key: str, ok: bool, err: str = "", insecure_tls: bool = False):
+def _note_feed(key: str, ok: bool, err: str = "", insecure_tls: bool = False, count=None):
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     h = _feed_health.setdefault(key, {"consecutive_failures": 0})
     h["last_attempt_at"] = now
     if ok:
         h.update(last_success_at=now, consecutive_failures=0, failing_since=None,
-                 last_error=None, insecure_tls=insecure_tls)
+                 last_error=None, insecure_tls=insecure_tls, last_count=count)
     else:
         h["consecutive_failures"] = h.get("consecutive_failures", 0) + 1
         h["failing_since"] = h.get("failing_since") or now
         h["last_error"] = (err or "")[:160]
+
+_SPECIAL_READER_FEEDS = {"cisa_kev", "ghsa", "cvelist_github", "vulncheck_nvd", "vulncheck_kev", "mozilla"}
 
 def _feed_health_report() -> dict:
     """Shared by /v1/feeds and MCP get_feed_health."""
@@ -76,9 +78,10 @@ def _feed_health_report() -> dict:
         status = ("disabled" if _feed_disabled.get(k, 0) > time.time() else
                   "failing" if h.get("consecutive_failures") else
                   "ok (TLS certificate check skipped)" if h.get("insecure_tls") else
+                  "ok (no recent items)" if h.get("last_success_at") and h.get("last_count") == 0 else
                   "ok" if h.get("last_success_at") else "not yet checked")
         detail[k] = {"status": status, **{f: h.get(f) for f in
-                     ("last_success_at", "last_attempt_at", "failing_since", "consecutive_failures", "last_error")}}
+                     ("last_success_at", "last_attempt_at", "failing_since", "consecutive_failures", "last_error", "last_count")}}
     return {
         "tracking_since": datetime.fromtimestamp(START_TIME, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "failing_detail": {k: v for k, v in detail.items() if v["status"] in ("failing", "disabled")},
@@ -1059,8 +1062,8 @@ TRUSTED_FEEDS = {
     "cvefeed_high_critical": "https://cvefeed.io/rssfeed/severity/high.xml",
     # PRE-NVD: these publish CVEs hours–days before NIST NVD enriches them
     "ghsa":          "__GHSA_API__",       # GitHub Advisory Database API
-    "osv":           "__OSV_API__",        # Google OSV.dev API
-    "mitre_cve":     "__MITRE_CVE_API__",  # MITRE CVE List (cvelistV5)
+    # osv + mitre_cve removed 2026-10-31: both returned 0 items for months (OSV endpoint
+    # /v1/vulns doesn't exist; NVD needs pubEndDate). Covered by ghsa + cvelist_github.
     "cvelist_github":"__CVELIST_GITHUB__", # CVEProject/cvelistV5 — ALL CVEs within 1-2h
     "vulncheck_nvd": "__VULNCHECK_API__",  # VulnCheck NVD++ — faster + richer than NIST NVD
     "vulncheck_kev": "__VULNCHECK_KEV__",  # VulnCheck KEV — superset of CISA KEV + exploit intel
@@ -1934,7 +1937,7 @@ def fetch_rss(key:str, url:str) -> list:
         threading.Thread(target=supa_record_feed_metrics,
             args=(key,len(items),items,True,"",0),daemon=True).start()
         _feed_failures[key]=0; _feed_disabled.pop(key,None)
-        _note_feed(key, True)
+        _note_feed(key, True, count=len(items))
         return items
     except requests.exceptions.SSLError:
         try:
@@ -1942,7 +1945,7 @@ def fetch_rss(key:str, url:str) -> list:
             feed  = feedparser.parse(resp.content)
             items = [x for x in [normalise_entry(e, key) for e in (feed.entries or [])[:50]] if x is not None]
             log.warning(f"[{key}] SSL bypass — {len(items)} items")
-            _note_feed(key, True, insecure_tls=True)
+            _note_feed(key, True, insecure_tls=True, count=len(items))
             with cache_lock: cache[key] = items
             threading.Thread(target=supa_record_feed_metrics,
                 args=(key,len(items),items,True,"",0),daemon=True).start()
@@ -1959,7 +1962,7 @@ def fetch_rss(key:str, url:str) -> list:
                 threading.Thread(target=supa_record_feed_metrics,
                     args=(key,len(items),items,True,"proxy",0),daemon=True).start()
                 _feed_failures[key]=0; _feed_disabled.pop(key,None)
-                _note_feed(key, True)
+                _note_feed(key, True, count=len(items))
                 return items
         log.error(f"[{key}] Failed: {e}")
         threading.Thread(target=supa_record_feed_metrics,
@@ -3069,12 +3072,12 @@ def fetch_all_advisories() -> list:
             else:                         futures[executor.submit(fetch_rss, key, url)] = key
         for future in as_completed(futures):
             key = futures[future]
-            api_feed = not str(TRUSTED_FEEDS.get(key, "")).startswith("http")
+            api_feed = key in _SPECIAL_READER_FEEDS
             try:
                 got = future.result()
                 results.extend(got)
-                if api_feed and got:
-                    _note_feed(key, True)
+                if api_feed:
+                    _note_feed(key, True, count=len(got))
             except Exception as e:
                 log.error(f"Thread error: {e}")
                 if api_feed:
