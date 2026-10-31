@@ -1550,7 +1550,7 @@ def dedupe_and_enrich(items:list) -> list:
                 sl.append(src)
             ex["sources_list"] = sl
             ex["source_count"] = len(sl)
-            ex["duplicate_cve"] = True
+            ex["merged"] = True   # this record absorbed other sources (was "duplicate_cve" — misread as "is a duplicate")
 
             # Accumulate CVE array (union of all CVEs from all sources)
             all_cves = set(ex.get("cves") or ([ex["cve"]] if ex.get("cve") else []))
@@ -1629,7 +1629,7 @@ def dedupe_and_enrich(items:list) -> list:
             idx_new = len(out)
             a["sources_list"]  = [a.get("source","")]
             a["source_count"]  = 1
-            a["duplicate_cve"] = False
+            a["merged"] = False
             if cve and cve.startswith("CVE-"):
                 seen_cve[cve] = idx_new
             seen_url[uid] = idx_new
@@ -2796,6 +2796,10 @@ def _cvss_tier(score: float) -> str:
 
 def reconcile_advisory(a: dict) -> dict:
     """Make fields consistent. Idempotent — safe on fresh and stored rows."""
+    # 0. Legacy field name on stored rows: duplicate_cve meant "merged", not "is a duplicate"
+    if "duplicate_cve" in a:
+        a.setdefault("merged", bool(a.pop("duplicate_cve")))
+
     # 1. Split "Key: Value" metadata out of products
     meta, clean = {}, []
     for p in (a.get("products") or []):
