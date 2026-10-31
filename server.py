@@ -52,6 +52,39 @@ cache      = TTLCache(maxsize=200, ttl=3600)
 cache_lock = threading.Lock()
 _feed_failures:dict = {}  # consecutive failures per source
 _feed_disabled:dict = {}  # {key: disabled_until_unix_ts}
+# Per-feed history for /v1/feeds + MCP get_feed_health: when it last worked, since when
+# it has been failing, why. In memory — resets on restart (reported as tracking_since).
+_feed_health:dict = {}    # {key: {last_attempt_at, last_success_at, failing_since, consecutive_failures, last_error, insecure_tls}}
+
+def _note_feed(key: str, ok: bool, err: str = "", insecure_tls: bool = False):
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    h = _feed_health.setdefault(key, {"consecutive_failures": 0})
+    h["last_attempt_at"] = now
+    if ok:
+        h.update(last_success_at=now, consecutive_failures=0, failing_since=None,
+                 last_error=None, insecure_tls=insecure_tls)
+    else:
+        h["consecutive_failures"] = h.get("consecutive_failures", 0) + 1
+        h["failing_since"] = h.get("failing_since") or now
+        h["last_error"] = (err or "")[:160]
+
+def _feed_health_report() -> dict:
+    """Shared by /v1/feeds and MCP get_feed_health."""
+    detail = {}
+    for k in TRUSTED_FEEDS:
+        h = _feed_health.get(k, {})
+        status = ("disabled" if _feed_disabled.get(k, 0) > time.time() else
+                  "failing" if h.get("consecutive_failures") else
+                  "ok (TLS certificate check skipped)" if h.get("insecure_tls") else
+                  "ok" if h.get("last_success_at") else "not yet checked")
+        detail[k] = {"status": status, **{f: h.get(f) for f in
+                     ("last_success_at", "last_attempt_at", "failing_since", "consecutive_failures", "last_error")}}
+    return {
+        "tracking_since": datetime.fromtimestamp(START_TIME, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "failing_detail": {k: v for k, v in detail.items() if v["status"] in ("failing", "disabled")},
+        "insecure_tls":   [k for k, v in detail.items() if v["status"].startswith("ok (TLS")],
+        "feeds":          detail,
+    }
 
 # ─── IN-MEMORY ADVISORY CACHE ─────────────────────────────────────────────────
 # Caches full Supabase advisory read for 10 minutes in Flask process memory.
@@ -964,6 +997,7 @@ def match_cnx_stack(advisory: dict) -> dict:
     text = " ".join([
         (advisory.get("vendor") or ""),
         (advisory.get("title") or ""),
+        (advisory.get("title_raw") or ""),
         (advisory.get("summary") or ""),
         " ".join(advisory.get("products") or []),
         (advisory.get("source") or ""),
@@ -1900,6 +1934,7 @@ def fetch_rss(key:str, url:str) -> list:
         threading.Thread(target=supa_record_feed_metrics,
             args=(key,len(items),items,True,"",0),daemon=True).start()
         _feed_failures[key]=0; _feed_disabled.pop(key,None)
+        _note_feed(key, True)
         return items
     except requests.exceptions.SSLError:
         try:
@@ -1907,11 +1942,13 @@ def fetch_rss(key:str, url:str) -> list:
             feed  = feedparser.parse(resp.content)
             items = [x for x in [normalise_entry(e, key) for e in (feed.entries or [])[:50]] if x is not None]
             log.warning(f"[{key}] SSL bypass — {len(items)} items")
+            _note_feed(key, True, insecure_tls=True)
             with cache_lock: cache[key] = items
             threading.Thread(target=supa_record_feed_metrics,
                 args=(key,len(items),items,True,"",0),daemon=True).start()
             return items
-        except Exception as e2: log.error(f"[{key}] SSL fallback: {e2}"); return []
+        except Exception as e2:
+            log.error(f"[{key}] SSL fallback: {e2}"); _note_feed(key, False, f"SSL error: {e2}"); return []
     except Exception as e:
         # 403 on known IP-blocked feeds — try RSS proxy fallback before giving up
         if ("403" in str(e) or "Forbidden" in str(e)) and key in IP_BLOCKED_FEEDS:
@@ -1922,11 +1959,13 @@ def fetch_rss(key:str, url:str) -> list:
                 threading.Thread(target=supa_record_feed_metrics,
                     args=(key,len(items),items,True,"proxy",0),daemon=True).start()
                 _feed_failures[key]=0; _feed_disabled.pop(key,None)
+                _note_feed(key, True)
                 return items
         log.error(f"[{key}] Failed: {e}")
         threading.Thread(target=supa_record_feed_metrics,
             args=(key,0,[],False,str(e)[:200],0),daemon=True).start()
         _feed_failures[key]=_feed_failures.get(key,0)+1
+        _note_feed(key, False, str(e))
         if _feed_failures[key]>=FEED_DISABLE_AFTER:
             _feed_disabled[key]=time.time()+(FEED_RETRY_AFTER_H*3600)
             log.warning(f"[{key}] Auto-disabled after {_feed_failures[key]} failures — retry in {FEED_RETRY_AFTER_H}h")
@@ -2794,6 +2833,103 @@ _SOURCE_RISK_SEV = {"problematic": "Low", "critical": "Medium", "very critical":
 def _cvss_tier(score: float) -> str:
     return "Critical" if score >= 9 else "High" if score >= 7 else "Medium" if score >= 4 else "Low"
 
+# ─── TITLE CLEAN-UP ──────────────────────────────────────────────────────────
+# Many feeds (CVE List, VulnCheck, GHSA) have no title, so the first ~120 chars of
+# the description were used. Rewrite only those as "Product — Vulnerability type".
+_VULN_TYPES = [   # specific class first, impact (RCE) after injections
+    (r"php object injection", "PHP Object Injection"),
+    (r"sql injection", "SQL Injection"),
+    (r"(os )?command injection", "Command Injection"),
+    (r"deserializ", "Insecure Deserialization"),
+    (r"(remote|arbitrary) code execution|\bcode execution\b|\brce\b", "Remote Code Execution"),
+    (r"authentication bypass|bypass(es)? authentication", "Authentication Bypass"),
+    (r"privilege escalation|elevation of privilege|escalate privileges", "Privilege Escalation"),
+    (r"server[- ]side request forgery|\bssrf\b", "SSRF"),
+    (r"path traversal|directory traversal", "Path Traversal"),
+    (r"arbitrary file (upload|deletion|read)|unrestricted (file )?upload", "Arbitrary File Upload/Access"),
+    (r"(local|remote) file inclusion", "File Inclusion"),
+    (r"xml external entit|\bxxe\b", "XXE"),
+    (r"cross[- ]site scripting|\bxss\b", "Cross-Site Scripting"),
+    (r"cross[- ]site request forgery|\bcsrf\b", "CSRF"),
+    (r"missing authori[sz]ation|authori[sz]ation bypass|unauthori[sz]ed (modification|access|loss)", "Missing Authorization"),
+    (r"use[- ]after[- ]free", "Use-After-Free"),
+    (r"out[- ]of[- ]bounds (write|read)", "Out-of-Bounds Access"),
+    (r"(heap|stack|buffer)[- ](based )?(buffer )?overflow", "Buffer Overflow"),
+    (r"integer overflow", "Integer Overflow"),
+    (r"open redirect", "Open Redirect"),
+    (r"race condition", "Race Condition"),
+    (r"null pointer dereference", "NULL Pointer Dereference"),
+    (r"information (disclosure|exposure)|sensitive information|information leak", "Information Disclosure"),
+    (r"denial[- ]of[- ]service|\bdos\b", "Denial of Service"),
+    (r"memory leak", "Memory Leak"),
+    # Vendor phrasings (Apple: "A <type> issue was addressed…", NVD-style CWE names)
+    (r"memory corruption", "Memory Corruption"),
+    (r"type confusion", "Type Confusion"),
+    (r"link[- ]following|symlink", "Link Following"),
+    (r"uninitiali[sz]ed (process )?memory|uninitiali[sz]ed", "Uninitialized Memory"),
+    (r"hard[- ]coded (credential|password|key)", "Hard-coded Credentials"),
+    (r"missing encryption|cleartext (storage|transmission)", "Missing Encryption"),
+    (r"improper neutrali[sz]ation|incomplete filtering|injection", "Injection"),
+    (r"improper (input )?validation|input validation", "Improper Input Validation"),
+    (r"authori[sz]ation (handling|check|issue|flaw)|permissions? issue|access control|improper access", "Access Control Flaw"),
+    (r"logic issue|logic error|business logic", "Logic Flaw"),
+    (r"improper certificate validation|certificate validation", "Certificate Validation"),
+    (r"(weak|broken|risky) (crypt|cipher|hash)|cryptographic issue", "Weak Cryptography"),
+]
+_VULN_TYPE_RX = [(re.compile(p, re.I), name) for p, name in _VULN_TYPES]
+# Always-verbose openings, regardless of length
+_SENTENCE_RX = re.compile(r"^(A|An) (vulnerability|issue|flaw|weakness)\b|^The .{2,90}? (is|are) vulnerable|^In [A-Z0-9]|^Vulnerability in the ", re.I)
+_LINUX_RX  = re.compile(r"^In the Linux kernel, the following vulnerability has been resolved:\s*(.+)", re.I | re.S)
+_ORACLE_RX = re.compile(r"^Vulnerability in the (.+?) product of .+? \(component: ([^)]+)\)", re.I)
+_DESC_TITLED_SOURCES = {"cvelist_github", "mitre_cve", "vulncheck_nvd", "osv"}   # not ghsa: its summaries are real titles
+_CVE_PREFIX_RX = re.compile(r"^\s*CVE-\d{4}-\d{4,7}\s*[|:—–-]\s*")
+
+def _short_title(a: dict):
+    """Return a cleaner title, or None to keep the current one. Idempotent."""
+    t = (a.get("title") or "").strip()
+    if not t or a.get("isNews"):
+        return None
+    # 1. Leading "CVE-… |" / "CVE-… —" — the card already shows the ID
+    stripped = _CVE_PREFIX_RX.sub("", t)
+    if stripped != t and len(stripped) > 10:
+        t = stripped[0].upper() + stripped[1:]
+    # 2. Description used as a title → "Product — Vulnerability type"
+    if _SENTENCE_RX.search(t) or (len(t) > 90 and a.get("source") in _DESC_TITLED_SOURCES):
+        text = f"{a.get('title_raw') or a.get('title') or ''} {a.get('summary') or ''}"
+        src_text = a.get("title_raw") or a.get("title") or ""
+        # summary keeps 400 chars; the stored title is the description cut at 120
+        lk = _LINUX_RX.search(a.get("summary") or "") or _LINUX_RX.search(src_text)
+        if lk:      # "In the Linux kernel, … resolved: wifi: iwlwifi: guard against …"
+            sub = " ".join(lk.group(1).strip().splitlines()[0].split())   # commit subject line only
+            sub = sub if len(sub) <= 70 else sub[:70].rsplit(" ", 1)[0] + "…"
+            return f"Linux kernel — {sub}"
+        orc = _ORACLE_RX.search(src_text)
+        if orc:     # "Vulnerability in the Oracle VM VirtualBox product of … (component: Core)"
+            return f"{orc.group(1).strip()} — {orc.group(2).strip()} component"
+        vtype = next((name for rx, name in _VULN_TYPE_RX if rx.search(text)), None)
+        m = re.search(r"The (.{2,60}?) (plugin|theme) for WordPress", text)
+        if m:
+            product = f"{m.group(1).strip()} (WordPress {m.group(2)})"
+        else:
+            p = next((str(x) for x in (a.get("products") or []) if x and "n/a" not in str(x).lower()), "")
+            words = p.split()
+            half = len(words) // 2      # "Gravity Forms Gravity Forms" -> "Gravity Forms"
+            if half and words[:half] == words[half:half * 2]:
+                p = " ".join(words[:half])
+            vend = (a.get("vendor") or "").strip()
+            if vend and p.lower().startswith(vend.lower() + " "):
+                rest = p[len(vend) + 1:]   # "ProFTPD Project ProFTPD" -> "ProFTPD"
+                if rest.split() and rest.split()[0].lower() in vend.lower().split():
+                    p = rest
+            product = p or (a.get("vendor") if a.get("vendor") not in (None, "", "MITRE", a.get("source")) else "")
+        if vtype and product:
+            unauth = " (unauthenticated)" if re.search(r"\bunauthenticated\b", text, re.I) else ""
+            return f"{product[:60]} — {vtype}{unauth}"
+        if len(t) > 90:      # can't classify: cut at a word boundary
+            return t[:85].rsplit(" ", 1)[0].rstrip(",;:.") + "…"   # <=86 chars: stable on re-run
+    return t if t != (a.get("title") or "").strip() else None
+
+
 def reconcile_advisory(a: dict) -> dict:
     """Make fields consistent. Idempotent — safe on fresh and stored rows."""
     # 0. Legacy field name on stored rows: duplicate_cve meant "merged", not "is a duplicate"
@@ -2850,7 +2986,13 @@ def reconcile_advisory(a: dict) -> dict:
         if expl == "active":
             a["zeroDay"] = True
 
-    # 4. Severity: CVSS decides when present (KEV stays Critical — active exploitation)
+    # 4. Title: description-as-title -> "Product — Vulnerability type"; original kept
+    nt = _short_title(a)
+    if nt:
+        a.setdefault("title_raw", a.get("title"))
+        a["title"] = nt
+
+    # 5. Severity: CVSS decides when present (KEV stays Critical — active exploitation)
     sev = a.get("severity") or "Unknown"
     is_kev = bool(a.get("isKev")) or a.get("source") in _KEV_SOURCES or "KEV" in (a.get("tags") or [])
     try:
@@ -2926,8 +3068,17 @@ def fetch_all_advisories() -> list:
             elif key == "vulncheck_kev":  futures[executor.submit(fetch_vulncheck_kev)] = key
             else:                         futures[executor.submit(fetch_rss, key, url)] = key
         for future in as_completed(futures):
-            try: results.extend(future.result())
-            except Exception as e: log.error(f"Thread error: {e}")
+            key = futures[future]
+            api_feed = not str(TRUSTED_FEEDS.get(key, "")).startswith("http")
+            try:
+                got = future.result()
+                results.extend(got)
+                if api_feed and got:
+                    _note_feed(key, True)
+            except Exception as e:
+                log.error(f"Thread error: {e}")
+                if api_feed:
+                    _note_feed(key, False, str(e))
     if skip_count: log.info(f"[FETCH] Skipped {skip_count} disabled sources")
     _release_memory()  # drop feed bodies/parse trees before enrichment
 
@@ -4891,6 +5042,7 @@ def v1_feeds():
             "disabled":      list(disabled),
             "failing":       failing,
             "sources":       list(TRUSTED_FEEDS.keys()),
+            **_feed_health_report(),
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -5143,6 +5295,7 @@ def mcp_execute():
                 "active":        SOURCE_COUNT - len(disabled),
                 "disabled":      list(disabled),
                 "failing":       {k: v for k, v in _feed_failures.items() if v > 0},
+                **_feed_health_report(),
             }
         else:
             return jsonify({"error": f"Handler not implemented for: {tool}"}), 501
