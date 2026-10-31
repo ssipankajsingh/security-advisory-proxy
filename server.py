@@ -546,15 +546,27 @@ def supa_save_advisory_cache(advisories:list) -> bool:
                         row["data"]["severity"]                  = ex["severity"]
                         row["data"]["severity_corrected_by_nvd"] = True
                         row["data"]["_nvd_queried"]              = True
+        # KEV / zero-day rows are exempt from archiving, but the nightly job only checks
+        # that when it runs: a CVE archived as an ordinary advisory and LATER added to KEV
+        # stayed hidden (65 of 565 KEVs were). Un-archive them whenever they're saved.
+        for row in rows:
+            if row["is_kev"] or row["is_zero_day"]:
+                row["is_archived"] = False
+        # PostgREST bulk upsert needs identical keys per request — batch per key set.
+        groups = {}
+        for row in rows:
+            groups.setdefault(tuple(sorted(row)), []).append(row)
         saved = 0; failed = 0
-        for i in range(0, len(rows), 100):
-            r = requests.post(f"{SUPABASE_URL}/rest/v1/advisory_cache",
-                            headers=h, json=rows[i:i+100], timeout=20)
-            if r.status_code not in (200,201):
-                log.warning(f"[SUPABASE] Cache batch {i//100} failed: {r.status_code} — {r.text[:100]}")
-                failed += len(rows[i:i+100])
-            else:
-                saved += len(rows[i:i+100])
+        for grp in groups.values():
+            for i in range(0, len(grp), 100):
+                chunk = grp[i:i+100]
+                r = requests.post(f"{SUPABASE_URL}/rest/v1/advisory_cache",
+                                headers=h, json=chunk, timeout=20)
+                if r.status_code not in (200,201):
+                    log.warning(f"[SUPABASE] Cache batch failed: {r.status_code} — {r.text[:100]}")
+                    failed += len(chunk)
+                else:
+                    saved += len(chunk)
 
         # R2/R4 fix: retention based on advisory type.
         # KEV + ZeroDay items kept longer — they remain exploitable past 30 days.
