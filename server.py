@@ -459,8 +459,10 @@ def supa_save_advisory_cache(advisories:list) -> bool:
     try:
         now = datetime.now(timezone.utc).isoformat()
         # IMP2: strip large/derived fields before saving — cuts row 1.1KB→400B
+        # "tags" is kept (capped below): it carries KEV / ransomware / exploit-available /
+        # exploitation signals that were previously lost on every save.
         STRIP_FIELDS = {"description","isNew","data_quality","exploit_refs",
-                        "epss_date","tags","author","kev_notes"}
+                        "epss_date","author","kev_notes"}
         rows = []
         for a in advisories[:15000]:
             aid = a.get("id")
@@ -471,6 +473,7 @@ def supa_save_advisory_cache(advisories:list) -> bool:
             compressed = {k: v for k, v in a.items() if k not in STRIP_FIELDS}
             if compressed.get("summary"): compressed["summary"] = compressed["summary"][:300]
             if compressed.get("title"):   compressed["title"]   = compressed["title"][:200]
+            if compressed.get("tags"):    compressed["tags"]    = [str(t)[:30] for t in compressed["tags"][:6]]
             rows.append({
                 "id":          aid[:500],
                 "data":        {**compressed, "isNew": False},
@@ -1560,7 +1563,7 @@ def dedupe_and_enrich(items:list) -> list:
             # Boolean OR-merge — if ANY source confirms, it's true
             if a.get("zeroDay"):        ex["zeroDay"]        = True
             if a.get("isOEM"):          ex["isOEM"]          = True
-            if a.get("isKev") or a.get("source","") in ("cisa_kev","vulncheck_kev"):
+            if a.get("isKev") or a.get("source","") in ("cisa_kev","CISA KEV","vulncheck_kev"):
                 ex["isKev"] = True
 
             # Field quality merge — higher priority source wins on conflict
@@ -1587,7 +1590,7 @@ def dedupe_and_enrich(items:list) -> list:
                     ex["severity"] = a["severity"]
 
             # Always take KEV enrichment fields from KEV sources
-            if src in ("cisa_kev","vulncheck_kev"):
+            if src in ("cisa_kev","CISA KEV","vulncheck_kev"):
                 if a.get("required_action"): ex["required_action"] = a["required_action"]
                 if a.get("kev_due_date"):    ex["kev_due_date"]    = a["kev_due_date"]
                 if a.get("kev_notes"):       ex["kev_notes"]       = a["kev_notes"]
@@ -1944,7 +1947,12 @@ def fetch_cisa_kev() -> list:
                             timeout=15, headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"})
         resp.raise_for_status()
         items = []
-        for v in resp.json().get("vulnerabilities",[])[:50]:
+        # Whole retention window, not the first 50 (catalog is newest-first, so 50 ≈ 6 weeks
+        # while KEV retention is 2 years — older KEVs were never ingested).
+        kev_cut = (datetime.now(timezone.utc) - timedelta(days=CACHE_RETENTION_DAYS["kev"])).strftime("%Y-%m-%d")
+        for v in resp.json().get("vulnerabilities",[]):
+            if (v.get("dateAdded") or "") < kev_cut:
+                continue
             cve_id = v.get("cveID","")
             title  = f"{cve_id} — {v.get('vulnerabilityName','')}"
             summary= (f"{v.get('shortDescription','')} | Vendor: {v.get('vendorProject','')} | "
@@ -1958,7 +1966,10 @@ def fetch_cisa_kev() -> list:
                 "link":f"https://nvd.nist.gov/vuln/detail/{cve_id}","url":f"https://nvd.nist.gov/vuln/detail/{cve_id}",
                 "published":v.get("dateAdded",datetime.now(timezone.utc).isoformat()),
                 "severity":"Critical","cvss":None,"cve":cve_id,"cves":[cve_id],"zeroDay":True,
-                "source":"CISA KEV","vendor":"CISA","products":[v.get("product","")],"author":"","tags":["KEV"],"isOEM":True,
+                "source":"CISA KEV","vendor":normalise_vendor(v.get("vendorProject","")) or "CISA",
+                "products":[f"{v.get('vendorProject','')} {v.get('product','')}".strip()],"author":"",
+                "tags":["KEV"]+(["ransomware"] if v.get("knownRansomwareCampaignUse")=="Known" else []),
+                "isOEM":True,"isKev":True,
                 "fetched_at":datetime.now(timezone.utc).isoformat(),
                 "kev_due_date":due_date,"required_action":required_act,
                 "kev_notes":kev_notes,"patch_status":patch_status})
@@ -2813,7 +2824,17 @@ def reconcile_advisory(a: dict) -> dict:
             # which ship the fix at the same time.
             a["patch_status"], a["patch_status_source"] = "available", "oracle_cpu"
 
-    # 3. Severity: CVSS decides when present (KEV stays Critical — active exploitation)
+    # 3. CISA SSVC exploitation (stored field) -> tags / zero-day, also for old rows
+    expl = a.get("exploitation")
+    if expl in ("active", "poc"):
+        tag = "exploited" if expl == "active" else "poc-public"
+        tags = list(a.get("tags") or [])
+        if tag not in tags:
+            a["tags"] = tags + [tag]
+        if expl == "active":
+            a["zeroDay"] = True
+
+    # 4. Severity: CVSS decides when present (KEV stays Critical — active exploitation)
     sev = a.get("severity") or "Unknown"
     is_kev = bool(a.get("isKev")) or a.get("source") in _KEV_SOURCES or "KEV" in (a.get("tags") or [])
     try:
