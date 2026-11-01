@@ -1154,6 +1154,10 @@ TRUSTED_FEEDS = {
     "docker":       "https://www.docker.com/blog/category/security/feed/",
 }
 
+# Direct-from-OEM CVE records for CNX vendors with no working feed (see OEM_CNA_SOURCES)
+TRUSTED_FEEDS.update({k: "__OEM_CNA__" for k in (
+    "oem_vmware", "oem_citrix", "oem_netapp", "oem_sap", "oem_adobe", "oem_apache",
+    "oem_arista", "oem_brocade", "oem_zscaler", "oem_netskope", "oem_crowdstrike", "oem_avaya")})
 SOURCE_COUNT = len(TRUSTED_FEEDS)
 
 # OEM/Vendor Tier 1 — direct vendor PSIRTs (structured, authoritative)
@@ -1528,6 +1532,8 @@ SOURCE_PRIORITY = {
 
 def _src_priority(source:str) -> int:
     """Return source trust priority — higher = more authoritative."""
+    if source.startswith("oem_"):
+        return 12          # vendor's own CVE record — same trust as a vendor PSIRT feed
     return SOURCE_PRIORITY.get(source, 5)
 
 
@@ -2855,6 +2861,8 @@ _VULN_TYPES = [   # specific class first, impact (RCE) after injections
     (r"information (disclosure|exposure)|sensitive information|information leak", "Information Disclosure"),
     (r"denial[- ]of[- ]service|\bdos\b", "Denial of Service"),
     (r"memory leak", "Memory Leak"),
+    (r"external control of file name or path", "Path Manipulation"),
+    (r"uncontrolled resource consumption|resource exhaustion", "Resource Exhaustion"),
     # Vendor phrasings (Apple: "A <type> issue was addressed…", NVD-style CWE names)
     (r"memory corruption", "Memory Corruption"),
     (r"type confusion", "Type Confusion"),
@@ -2887,7 +2895,7 @@ def _short_title(a: dict):
     if stripped != t and len(stripped) > 10:
         t = stripped[0].upper() + stripped[1:]
     # 2. Description used as a title → "Product — Vulnerability type"
-    if _SENTENCE_RX.search(t) or (len(t) > 90 and a.get("source") in _DESC_TITLED_SOURCES):
+    if _SENTENCE_RX.search(t) or (len(t) > 90 and (a.get("source") in _DESC_TITLED_SOURCES or str(a.get("source", "")).startswith("oem_"))):
         text = f"{a.get('title_raw') or a.get('title') or ''} {a.get('summary') or ''}"
         src_text = a.get("title_raw") or a.get("title") or ""
         # summary keeps 400 chars; the stored title is the description cut at 120
@@ -3036,6 +3044,152 @@ def _release_memory():
     try: ctypes.CDLL("libc.so.6").malloc_trim(0)
     except Exception: pass  # non-glibc (Windows/macOS/Alpine) — gc alone
 
+# ─── OEM (CNA) READERS ───────────────────────────────────────────────────────
+# CNX-stack vendors with no working direct feed. Each is a CVE Numbering Authority,
+# so it authors its own CVE records; NVD returns exactly those via sourceIdentifier.
+# That is the vendor's own statement (its CVSS, its advisory link), not a third party.
+OEM_CNA_SOURCES = {
+    # key:              (vendor,       NVD sourceIdentifier,                   product filter)
+    "oem_vmware":      ("VMware",      "security@vmware.com",                   None),
+    "oem_citrix":      ("Citrix",      "secure@citrix.com",                     None),
+    "oem_netapp":      ("NetApp",      "security-alert@netapp.com",             None),
+    "oem_sap":         ("SAP",         "cna@sap.com",                           None),
+    "oem_adobe":       ("Adobe",       "psirt@adobe.com",                       None),
+    # Apache is CNA for ~350 projects — keep only what's in the CNX stack
+    "oem_apache":      ("Apache",      "security@apache.org",                   r"log4j|tomcat|struts|http server|httpd"),
+    "oem_arista":      ("Arista",      "psirt@arista.com",                      None),
+    "oem_brocade":     ("Brocade",     "sirt@brocade.com",                      None),
+    "oem_zscaler":     ("Zscaler",     "cve@zscaler.com",                       None),
+    "oem_netskope":    ("Netskope",    "psirt@netskope.com",                    None),
+    "oem_crowdstrike": ("CrowdStrike", "13ddcd98-6f4a-40a8-8e24-29ca0aee4661",  None),
+    "oem_avaya":       ("Avaya",       "securityalerts@avaya.com",              None),
+}
+# Vendor web domains — fallback advisory link when NVD hasn't tagged "Vendor Advisory" yet
+_OEM_DOMAINS = {"VMware": ("broadcom.com", "vmware.com"), "Citrix": ("citrix.com", "cloud.com"),
+                "NetApp": ("netapp.com",), "SAP": ("sap.com",), "Adobe": ("adobe.com",),
+                "Apache": ("apache.org",), "Arista": ("arista.com",), "Brocade": ("broadcom.com", "brocade.com", "ruckus"),
+                "Zscaler": ("zscaler.com",), "Netskope": ("netskope.com",), "CrowdStrike": ("crowdstrike.com",),
+                "Avaya": ("avaya.com",)}
+_OEM_CNA_WINDOW_D = 90           # matches default retention
+_OEM_CNA_TTL      = 12 * 3600    # vendors publish weekly/monthly; NVD is rate limited
+_oem_cna_cache: dict = {}        # key -> (fetched_unix_ts, items)
+_nvd_lock = threading.Lock()
+_nvd_last = [0.0]
+
+def _nvd_get(params: dict):
+    """NVD CVE API, paced to the public limit (5 req/30s; 50 with NVD_API_KEY)."""
+    gap = 0.7 if NVD_API_KEY else 6.5
+    with _nvd_lock:
+        wait = _nvd_last[0] + gap - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        hdrs = {"User-Agent": "SecurityAdvisoryProxy/2.0"}
+        if NVD_API_KEY:
+            hdrs["apiKey"] = NVD_API_KEY
+        try:
+            return requests.get("https://services.nvd.nist.gov/rest/json/cves/2.0",
+                                params=params, headers=hdrs, timeout=30)
+        finally:
+            _nvd_last[0] = time.time()
+
+def _parse_nvd_cve(c: dict, key: str, vendor: str, sid: str, prod_rx):
+    cid  = c.get("id", "")
+    desc = next((d["value"] for d in c.get("descriptions", []) if d.get("lang") == "en"), "")
+    products = []
+    for cfg in c.get("configurations", []):
+        for node in cfg.get("nodes", []):
+            for mt in node.get("cpeMatch", []):
+                parts = (mt.get("criteria") or "").split(":")
+                if len(parts) > 4 and mt.get("vulnerable"):
+                    prod = parts[4].replace('_', ' ')
+                    prod = prod.title() if prod.islower() else prod   # CPE names are lowercase
+                    name = f"{vendor} {prod}".strip()
+                    if name not in products:
+                        products.append(name)
+    if not products:   # not yet analysed by NVD (no CPEs): vendor name + following capitalised words
+        m = re.search(rf"\b{re.escape(vendor)}\s+((?:[A-Z0-9][\w./+-]*\s?){{1,5}})", desc)
+        if m:
+            products = [f"{vendor} {m.group(1).strip()}"]
+    if prod_rx and not re.search(prod_rx, f"{desc} {' '.join(products)}", re.I):
+        return None
+    # CVSS: the vendor's own score first, then NVD's Primary
+    m = c.get("metrics", {})
+    cands = [x for k in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV40") for x in m.get(k, [])]
+    pick = (next((x for x in cands if x.get("source") == sid), None)
+            or next((x for x in cands if x.get("type") == "Primary"), None)
+            or (cands[0] if cands else None))
+    score = pick["cvssData"].get("baseScore") if pick else None
+    sev = ((pick["cvssData"].get("baseSeverity") or "").capitalize() if pick else "") or (
+          _cvss_tier(float(score)) if score else "Unknown")
+    refs  = c.get("references", [])
+    tags  = {t for r in refs for t in (r.get("tags") or [])}
+    vlink = (next((r["url"] for r in refs if "Vendor Advisory" in (r.get("tags") or [])), None)
+             or next((r["url"] for r in refs if any(d in (r.get("url") or "").lower()
+                                                    for d in _OEM_DOMAINS.get(vendor, ()))), None))
+    patch = ("available" if "Patch" in tags else "workaround" if "Mitigation" in tags
+             else _infer_patch_status(desc))
+    cwe = next((d["value"] for w in c.get("weaknesses", []) for d in w.get("description", [])
+                if str(d.get("value", "")).startswith("CWE-")), "")
+    published = c.get("published", "")
+    if published and not published.endswith("Z") and "+" not in published:
+        published += "Z"
+    is_kev = bool(c.get("cisaExploitAdd"))
+    return {
+        "id": cid, "cve": cid, "cves": [cid],
+        "title": (desc[:120] if desc else cid), "summary": desc[:400], "description": desc[:1000],
+        "link": vlink or f"https://nvd.nist.gov/vuln/detail/{cid}",
+        "url":  vlink or f"https://nvd.nist.gov/vuln/detail/{cid}",
+        "published": published, "severity": sev, "cvss": score,
+        "zeroDay": is_kev, "isKev": is_kev or None,
+        "kev_due_date": c.get("cisaActionDue", ""), "required_action": c.get("cisaRequiredAction", ""),
+        "source": key, "vendor": vendor, "products": products[:5], "author": "",
+        "tags": ["OEM-CNA"] + (["KEV"] if is_kev else []),
+        "isOEM": True, "isNews": False, "cwe": cwe, "patch_status": patch,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+def fetch_oem_cna_all(keys) -> list:
+    """Sequential (NVD pacing) — one background task for every OEM key; health per vendor."""
+    end   = datetime.now(timezone.utc)
+    start = end - timedelta(days=_OEM_CNA_WINDOW_D)
+    fmt   = lambda d: d.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    items = []
+    for key in keys:
+        vendor, sid, prod_rx = OEM_CNA_SOURCES[key]
+        hit = _oem_cna_cache.get(key)
+        if hit and time.time() - hit[0] < _OEM_CNA_TTL:
+            items += hit[1]
+            continue
+        got, ok, err, idx = [], True, "", 0
+        while True:
+            try:
+                r = _nvd_get({"sourceIdentifier": sid, "pubStartDate": fmt(start), "pubEndDate": fmt(end),
+                              "resultsPerPage": 2000, "startIndex": idx})
+                if r.status_code != 200:
+                    ok, err = False, f"NVD HTTP {r.status_code}"; break
+                d = r.json()
+                for v in d.get("vulnerabilities", []):
+                    a = _parse_nvd_cve(v.get("cve", {}), key, vendor, sid, prod_rx)
+                    if a and is_within_window(a["published"]):
+                        got.append(a)
+                idx += d.get("resultsPerPage", 0) or 2000
+                if idx >= d.get("totalResults", 0):
+                    break
+            except Exception as e:
+                ok, err = False, str(e); break
+        if ok:
+            _oem_cna_cache[key] = (time.time(), got)
+            _note_feed(key, True, count=len(got))
+            log.info(f"[{key}] ✅ {len(got)} vendor-authored CVEs (NVD sourceIdentifier={sid})")
+        else:
+            _note_feed(key, False, err)
+            log.warning(f"[{key}] {err}")
+            if hit:
+                got = hit[1]        # keep last good result rather than dropping the vendor
+        items += got
+    return items
+
+
 def fetch_all_advisories() -> list:
     results = []; futures = {}
     # Load source enabled/disabled config from Supabase (cached 5 min)
@@ -3045,6 +3199,7 @@ def fetch_all_advisories() -> list:
     # 8 not 25: each in-flight feed holds its raw body + feedparser tree; 25 at once
     # pushed the 512 MB free instance over its limit (OOM-killed mid-refresh).
     with ThreadPoolExecutor(max_workers=8) as executor:
+        oem_keys = []
         for key, url in TRUSTED_FEEDS.items():
             # Respect per-source enabled/disabled state from Supabase
             # If not in config at all, default to enabled (True)
@@ -3052,6 +3207,7 @@ def fetch_all_advisories() -> list:
                 log.debug(f"[FETCH] Skipping disabled source: {key}")
                 skip_count += 1
                 continue
+            if key.startswith("oem_"):   oem_keys.append(key); continue
             if key == "cisa_kev":        futures[executor.submit(fetch_cisa_kev)] = key
             elif key == "ghsa":           futures[executor.submit(fetch_ghsa)] = key
             elif key == "osv":            futures[executor.submit(fetch_osv)] = key
@@ -3060,6 +3216,8 @@ def fetch_all_advisories() -> list:
             elif key == "vulncheck_nvd":  futures[executor.submit(fetch_vulncheck_nvd)] = key
             elif key == "vulncheck_kev":  futures[executor.submit(fetch_vulncheck_kev)] = key
             else:                         futures[executor.submit(fetch_rss, key, url)] = key
+        if oem_keys:   # health is recorded per vendor inside the reader
+            futures[executor.submit(fetch_oem_cna_all, oem_keys)] = "__oem_cna__"
         for future in as_completed(futures):
             key = futures[future]
             api_feed = key in _SPECIAL_READER_FEEDS
