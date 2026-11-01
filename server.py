@@ -699,6 +699,8 @@ def supa_load_advisory_cache(bypass_mem_cache: bool = False) -> list:
         log.info(f"[SUPABASE] Deduped on load: {len(all_items)} → {len(deduped)} items")
     # Re-tag CNX matches on every load (~1s for 8K rows) so rule changes apply to stored
     # rows that no longer appear in any feed, not just to freshly fetched ones.
+    # Hide CVEs the CNA has withdrawn ("Rejected reason: … issued in error")
+    deduped = [i for i in deduped if not str(i.get("summary") or i.get("title_raw") or i.get("title") or "").startswith("Rejected reason")]
     for item in deduped:
         reconcile_advisory(item)
         cnx = match_cnx_stack(item)
@@ -2569,6 +2571,8 @@ def fetch_vulncheck_nvd() -> list:
         for vuln in (resp.json().get("data") or [])[:100]:
             cve_id = vuln.get("id","")
             if not cve_id: continue
+            if vuln.get("vulnStatus") == "Rejected" or str((vuln.get("descriptions") or [{}])[0].get("value","")).startswith("Rejected reason"):
+                continue     # withdrawn by the CNA
 
             # Parse descriptions
             descs  = vuln.get("descriptions",[])
@@ -2850,7 +2854,7 @@ _VULN_TYPES = [   # specific class first, impact (RCE) after injections
     (r"xml external entit|\bxxe\b", "XXE"),
     (r"cross[- ]site scripting|\bxss\b", "Cross-Site Scripting"),
     (r"cross[- ]site request forgery|\bcsrf\b", "CSRF"),
-    (r"missing authori[sz]ation|authori[sz]ation bypass|unauthori[sz]ed (modification|access|loss)", "Missing Authorization"),
+    (r"missing authori[sz]ation|(incorrect|improper) authori[sz]ation|authori[sz]ation bypass|unauthori[sz]ed (modification|access|loss)", "Missing Authorization"),
     (r"use[- ]after[- ]free", "Use-After-Free"),
     (r"out[- ]of[- ]bounds (write|read)", "Out-of-Bounds Access"),
     (r"(heap|stack|buffer)[- ](based )?(buffer )?overflow", "Buffer Overflow"),
@@ -2879,9 +2883,10 @@ _VULN_TYPES = [   # specific class first, impact (RCE) after injections
 ]
 _VULN_TYPE_RX = [(re.compile(p, re.I), name) for p, name in _VULN_TYPES]
 # Always-verbose openings, regardless of length
-_SENTENCE_RX = re.compile(r"^(A|An) (vulnerability|issue|flaw|weakness)\b|^The .{2,90}? (is|are) vulnerable|^In [A-Z0-9]|^Vulnerability in the ", re.I)
+_SENTENCE_RX = re.compile(r"^(A|An) (vulnerability|issue|flaw|weakness)\b|^The .{2,90}? (is|are) vulnerable|^In [A-Z0-9]|^Vulnerability in the |^.{3,60}? (is|are) affected by an? ", re.I)
 _LINUX_RX  = re.compile(r"^In the Linux kernel, the following vulnerability has been resolved:\s*(.+)", re.I | re.S)
 _ORACLE_RX = re.compile(r"^Vulnerability in the (.+?) product of .+? \(component: ([^)]+)\)", re.I)
+_AFFECTED_RX = re.compile(r"^(.{3,60}?) (?:versions? .{1,60}? )?(?:is|are) affected by an? ", re.I)
 _DESC_TITLED_SOURCES = {"cvelist_github", "mitre_cve", "vulncheck_nvd", "osv"}   # not ghsa: its summaries are real titles
 _CVE_PREFIX_RX = re.compile(r"^\s*CVE-\d{4}-\d{4,7}\s*[|:—–-]\s*")
 
@@ -2909,8 +2914,11 @@ def _short_title(a: dict):
             return f"{orc.group(1).strip()} — {orc.group(2).strip()} component"
         vtype = next((name for rx, name in _VULN_TYPE_RX if rx.search(text)), None)
         m = re.search(r"The (.{2,60}?) (plugin|theme) for WordPress", text)
+        af = _AFFECTED_RX.search(src_text)
         if m:
             product = f"{m.group(1).strip()} (WordPress {m.group(2)})"
+        elif af:      # "Adobe Commerce is affected by an Incorrect Authorization vulnerability"
+            product = af.group(1).strip()
         else:
             p = next((str(x) for x in (a.get("products") or []) if x and "n/a" not in str(x).lower()), "")
             words = p.split()
@@ -3095,6 +3103,8 @@ def _nvd_get(params: dict):
 def _parse_nvd_cve(c: dict, key: str, vendor: str, sid: str, prod_rx):
     cid  = c.get("id", "")
     desc = next((d["value"] for d in c.get("descriptions", []) if d.get("lang") == "en"), "")
+    if c.get("vulnStatus") == "Rejected" or desc.startswith("Rejected reason"):
+        return None          # withdrawn by the CNA ("issued in error")
     products = []
     for cfg in c.get("configurations", []):
         for node in cfg.get("nodes", []):
