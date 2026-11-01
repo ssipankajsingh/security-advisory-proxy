@@ -1006,7 +1006,7 @@ def match_cnx_stack(advisory: dict) -> dict:
         (advisory.get("summary") or ""),
         " ".join(advisory.get("products") or []),
         (advisory.get("source") or ""),
-    ]).lower()
+    ]).lower().replace("citirx", "citrix")   # typo seen in a Citrix-authored CVE record
 
     matched_vendors = set()
     matched_tier = None
@@ -1014,6 +1014,9 @@ def match_cnx_stack(advisory: dict) -> dict:
     eol_products = []
 
     found = {m.group(1) for m in _CNX_RX.finditer(text)}   # whole-word hits only
+    # "BOSH vCenter CPI" is a Tanzu/BOSH plugin, not vCenter itself
+    if "vcenter cpi" in text:
+        found.discard("vcenter")
 
     # Vendor-level match
     named_vendors = {_CNX_VENDOR_KEYWORDS[k] for k in found if k in _CNX_VENDOR_KEYWORDS}
@@ -1022,19 +1025,33 @@ def match_cnx_stack(advisory: dict) -> dict:
         matched_tier = CNX_STACK[vendor_key]["tier"]
 
     # Product-level match (ambiguous names need their vendor named too)
+    product_vendors = set()
     for prod_kw, vendor_key, prod_eol in _CNX_PRODUCT_KEYWORDS:
         if prod_kw not in found:
             continue
         if prod_kw in _CNX_AMBIGUOUS and vendor_key not in named_vendors:
             continue
+        product_vendors.add(vendor_key)
         matched_vendors.add(vendor_key)
         matched_tier = CNX_STACK[vendor_key]["tier"]
         if prod_eol:
             is_eol = True
             eol_products.append(prod_kw)
 
+    # Vendor-authored CVE records (oem_*) cover the vendor's whole portfolio — count them
+    # only when a product in the CNX inventory is named. (Adobe: 542 CVEs, 142 for products
+    # in the stack; Experience Manager / ColdFusion / Commerce stay in the feed, untagged.)
+    # Only the record's own vendor counts — "Spring for Apache Kafka" is not an Apache/Linux hit.
+    source = str(advisory.get("source") or "")
+    oem_vendor = source[4:] if source.startswith("oem_") else None
+    if oem_vendor:
+        matched_vendors &= product_vendors & {oem_vendor}
+        if matched_vendors:
+            matched_tier = CNX_STACK[oem_vendor]["tier"]
+
     # Special: Log4j is critical — always flag
-    if "log4j" in text or "log4shell" in text or "cve-2021-44228" in (advisory.get("cve") or "").lower():
+    if (oem_vendor in (None, "apache")) and (
+            "log4j" in text or "log4shell" in text or "cve-2021-44228" in (advisory.get("cve") or "").lower()):
         matched_vendors.add("apache")
         matched_tier = "app"
         is_eol = True
