@@ -1052,6 +1052,11 @@ def match_cnx_stack(advisory: dict) -> dict:
 
 # ─── TRUSTED FEED REGISTRY ───────────────────────────────────────────────────
 TRUSTED_FEEDS = {
+    # Removed 2026-11-01 — URL served a web page, not a feed (0 items, found via the new
+    # per-feed item count), and no working official feed exists: apple, citrix, f5,
+    # trendmicro, zyxel, aruba, veeam, sap, apache, nginx, cert_in, vmware (Broadcom
+    # publishes JSON only), msrc_blog, mandiant, netskope. Their CVEs still arrive via the
+    # CVE List (each vendor is its own CNA) and CISA KEV.
     # Removed 2026-10-30 — no working official feed (CVEs still arrive via the CVE List,
     # where each vendor is the CNA): adobe (bulletins moved to Trust Center, email only),
     # android, checkpoint, schneider_ics, trellix (no RSS), forescout (403 to cloud IPs),
@@ -1072,10 +1077,9 @@ TRUSTED_FEEDS = {
     "cisa_alerts":        "https://www.cisa.gov/cybersecurity-advisories/all.xml",
     "cisa_kev":           "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
     "cisa_ics":           "https://www.cisa.gov/cybersecurity-advisories/ics-advisories.xml",
-    "ncsc_uk":            "https://www.ncsc.gov.uk/api/1/services/v1/report-rss-feed.xml",
+    "ncsc_uk":            "https://www.ncsc.gov.uk/api/1/services/v1/all-rss-feed.xml",
     "cert_eu":            "https://cert.europa.eu/publications/security-advisories-rss",
     "certeu_threat_intel":"https://cert.europa.eu/publications/threat-intelligence-rss",
-    "cert_in":            "https://www.cert-in.org.in/RSS/Vulnerability_Notes.xml",
     "sans_isc":           "https://isc.sans.edu/rssfeed.xml",
 
     # ══ CVE / EXPLOIT DATABASES ══════════════════════════════════════════════
@@ -1086,28 +1090,21 @@ TRUSTED_FEEDS = {
 
     # ══ OS & PLATFORM ════════════════════════════════════════════════════════
     "msrc":      "https://api.msrc.microsoft.com/update-guide/rss",
-    "msrc_blog": "https://msrc.microsoft.com/blog/feed/",
-    "ms_azure":  "https://azurecomcdn.azureedge.net/en-us/updates/feed/",          # Azure Updates (security tagged)
-    "apple":     "https://support.apple.com/en-in/rss/securityupdates.rss",
+    "ms_azure":  "https://www.microsoft.com/releasecommunications/api/v2/azure/rss",
     "ubuntu":    "https://ubuntu.com/security/notices/rss.xml",
-    "redhat":    "https://access.redhat.com/security/security-updates/security-advisories.rss",
+    "redhat":    "https://access.redhat.com/security/data/metrics/rhsa.rss",
     "debian":    "https://www.debian.org/security/dsa-long",
 
     # ══ NETWORK & FIREWALL ═══════════════════════════════════════════════════
     "cisco":     "https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml",
     "fortinet":  "https://www.fortiguard.com/rss/ir.xml",
     "paloalto":  "https://security.paloaltonetworks.com/rss.xml",
-    "sonicwall": "https://psirt.global.sonicwall.com/vuln-list",                   # Fixed: was blog, now PSIRT
+    "sonicwall": "https://psirtapi.global.sonicwall.com/api/v1/feed/rss.xml",
     "ivanti":    "https://www.ivanti.com/blog/topics/security-advisory/rss",
-    "f5":        "https://support.f5.com/rss/security-advisories.xml",
     "juniper":   "https://supportportal.juniper.net/knowledgerss?type=Security",
-    "citrix":    "https://support.citrix.com/feed/news",
-    "aruba":     "https://support.hpe.com/hpesc/public/home/rss?docType=Security+Bulletin&sort=modified",
-    "zyxel":     "https://www.zyxel.com/global/en/support/security-advisories/rss",
 
     # ══ ENDPOINT SECURITY ════════════════════════════════════════════════════
     "sophos":        "https://www.sophos.com/en-us/security-advisories/feed",
-    "trendmicro":    "https://success.trendmicro.com/dcx/s/feed/advisories?language=en_US",  # Fixed: was feedburner blog
     "crowdstrike_blog": "https://www.crowdstrike.com/blog/feed/",
 
     # ══ CLOUD & INFRASTRUCTURE ═══════════════════════════════════════════════
@@ -1117,15 +1114,10 @@ TRUSTED_FEEDS = {
 
     # ══ MIDDLEWARE / DB / OPEN SOURCE ════════════════════════════════════════
     "mozilla":  "https://blog.mozilla.org/security/feed/",
-    "apache":   "https://blogs.apache.org/security/feed/entries/rss",
     "oracle":   "https://www.oracle.com/ocom/groups/public/@otn/documents/webcontent/rss-otn-sec.xml",
-    "vmware":   "https://community.broadcom.com/blogs/rss/4",
     "splunk":   "https://advisory.splunk.com/feed.xml",
-    "veeam":    "https://www.veeam.com/rss/security-advisories.xml",
-    "nginx":    "https://nginx.org/en/security_advisories.html",                    # HTML only — kept for link tracking
 
     # ══ ENTERPRISE APPS (NEW) ════════════════════════════════════════════════
-    "sap":       "https://dam.sap.com/mac/app/e/rss/link.htm?fid=73554900100800001281",  # SAP Security Notes RSS
     "atlassian": "https://jira.atlassian.com/sr/jira.issueviews:searchrequest-rss/temp/SearchRequest.xml?jqlQuery=labels+%3D+advisory+ORDER+BY+created+DESC&tempMax=50",
     "gitlab":    "https://about.gitlab.com/security-releases.xml",
     "solarwinds":"https://www.solarwinds.com/shared-content/rss-feed/solarwinds-cve-rss-feed.xml",
@@ -1137,7 +1129,6 @@ TRUSTED_FEEDS = {
     "proofpoint": "https://www.proofpoint.com/us/rss.xml",
 
     # ══ THREAT INTEL ══════════════════════════════════════════════════════════
-    "mandiant":    "https://www.mandiant.com/resources/blog/rss.xml",
     "talos":       "https://feeds.feedburner.com/feedburner/Talos",
     "unit42":      "https://unit42.paloaltonetworks.com/feed/",
     "msft_ti":     "https://www.microsoft.com/en-us/security/blog/feed/",
@@ -1156,7 +1147,6 @@ TRUSTED_FEEDS = {
     # ══ RESEARCH / BLOGS (NEWS_SOURCES classification) ═══════════════════════
     "eset":         "https://www.welivesecurity.com/en/feed/",
     "malwarebytes": "https://www.malwarebytes.com/blog/feed/",
-    "netskope":     "https://www.netskope.com/blog/feed",
     "sentinelone":  "https://www.sentinelone.com/labs/feed/",
     "project_zero": "https://googleprojectzero.blogspot.com/feeds/posts/default",
     "cloudflare":   "https://blog.cloudflare.com/tag/security/rss/",
