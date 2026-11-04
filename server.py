@@ -3031,6 +3031,12 @@ def reconcile_advisory(a: dict) -> dict:
             age = None
         a["epss_status"] = "pending" if age is None or age < 7 else "not_scored"
 
+    # 4c. ZDI publishes its own CVSS in the text ("The ZDI has assigned a CVSS rating of 7.8")
+    if a.get("cvss") in (None, "") and str(a.get("source") or "").startswith("zdi_"):
+        m = re.search(r"CVSS (?:rating|score) of (\d{1,2}(?:\.\d)?)", f"{a.get('summary') or ''} {a.get('description') or ''}")
+        if m and 0 < float(m.group(1)) <= 10:
+            a["cvss"] = float(m.group(1))
+
     # 5. Severity: CVSS decides when present (KEV stays Critical — active exploitation)
     if "severity_label" in a:   # legacy name — easy to mistake for the real severity
         a.setdefault("source_severity", a.pop("severity_label"))
@@ -3152,6 +3158,10 @@ def _parse_nvd_cve(c: dict, key: str, vendor: str, sid: str, prod_rx):
         m = re.search(rf"\b{re.escape(vendor)}\s+((?:[A-Z0-9][\w./+-]*\s?){{1,5}})", desc)
         if m:
             products = [f"{vendor} {m.group(1).strip()}"]
+    if not products:   # description opens with the product: "StorageGRID (formerly …) versions 11.3 and higher allow…"
+        m = re.match(r"^([A-Z][\w.+-]*(?: [\w.+/-]+| \([^)]{1,40}\)){0,5}?)\s+(?:versions?|before|prior to|through|allows?|is|are|has|contains)", desc)
+        if m and m.group(1).split()[0].lower() not in ("a", "an", "the", "in", "vulnerability", "this", "multiple", "some"):
+            products = [m.group(1).strip()[:70]]
     if prod_rx and not re.search(prod_rx, f"{desc} {' '.join(products)}", re.I):
         return None
     # CVSS: the vendor's own score first, then NVD's Primary
