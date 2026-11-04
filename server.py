@@ -3019,6 +3019,8 @@ def reconcile_advisory(a: dict) -> dict:
         a["title"] = nt
 
     # 5. Severity: CVSS decides when present (KEV stays Critical — active exploitation)
+    if "severity_label" in a:   # legacy name — easy to mistake for the real severity
+        a.setdefault("source_severity", a.pop("severity_label"))
     sev = a.get("severity") or "Unknown"
     is_kev = bool(a.get("isKev")) or a.get("source") in _KEV_SOURCES or "KEV" in (a.get("tags") or [])
     try:
@@ -3028,13 +3030,13 @@ def reconcile_advisory(a: dict) -> dict:
     if score is not None and 0 < score <= 10:
         tier = _cvss_tier(score)
         if tier != sev and not (is_kev and sev == "Critical"):
-            a.setdefault("severity_label", sev)
+            a.setdefault("source_severity", sev)
             a["severity"] = tier
     elif a.get("source_risk") in _SOURCE_RISK_SEV and a.get("source") == "vuldb" and not is_kev:
         # No CVSS yet: VulDB's own risk rating beats keyword guessing on the text
         rs = _SOURCE_RISK_SEV[a["source_risk"]]
         if rs != sev:
-            a.setdefault("severity_label", sev)
+            a.setdefault("source_severity", sev)
             a["severity"] = rs
     return a
 
