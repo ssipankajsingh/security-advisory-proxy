@@ -3159,7 +3159,7 @@ def _parse_nvd_cve(c: dict, key: str, vendor: str, sid: str, prod_rx):
         if m:
             products = [f"{vendor} {m.group(1).strip()}"]
     if not products:   # description opens with the product: "StorageGRID (formerly …) versions 11.3 and higher allow…"
-        m = re.match(r"^([A-Z][\w.+-]*(?: [\w.+/-]+| \([^)]{1,40}\)){0,5}?)\s+(?:versions?|before|prior to|through|allows?|is|are|has|contains)", desc)
+        m = re.match(r"^([A-Z][\w.+-]*(?: [\w.+/-]+| \([^)]{1,40}\)){0,5}?)\s+(?:versions?|before|prior to|through|allows?|is|are|has|contains)\b", desc)
         if m and m.group(1).split()[0].lower() not in ("a", "an", "the", "in", "vulnerability", "this", "multiple", "some"):
             products = [m.group(1).strip()[:70]]
     if prod_rx and not re.search(prod_rx, f"{desc} {' '.join(products)}", re.I):
