@@ -3018,6 +3018,19 @@ def reconcile_advisory(a: dict) -> dict:
         a.setdefault("title_raw", a.get("title"))
         a["title"] = nt
 
+    # 4b. EPSS indicator: a null score is never silent — scored / pending (FIRST lags new CVEs
+    #     by a few days) / not_scored (older, still none) / n/a (no CVE id)
+    if a.get("epss") not in (None, ""):
+        a["epss_status"] = "scored"
+    elif not str(a.get("cve") or "").upper().startswith("CVE-"):
+        a["epss_status"] = "n/a"
+    else:
+        try:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(str(a.get("published")).replace("Z", "+00:00"))).days
+        except (TypeError, ValueError):
+            age = None
+        a["epss_status"] = "pending" if age is None or age < 7 else "not_scored"
+
     # 5. Severity: CVSS decides when present (KEV stays Critical — active exploitation)
     if "severity_label" in a:   # legacy name — easy to mistake for the real severity
         a.setdefault("source_severity", a.pop("severity_label"))
